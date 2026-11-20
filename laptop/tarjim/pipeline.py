@@ -9,6 +9,7 @@ costs nothing extra.
 from __future__ import annotations
 
 import dataclasses
+import difflib
 import json
 import statistics
 import threading
@@ -22,7 +23,7 @@ import numpy as np
 
 from . import paths
 from . import protocol as P
-from .translate import CachedTranslator, TranslateError, normalize_english
+from .translate import CachedTranslator, TranslateError, loose_key, normalize_english
 from .tvlink import TvLink, TvLinkError, now_ms
 from .vision import render
 from .vision.detect import Block, DetectParams, detect, mask_iou
@@ -52,6 +53,21 @@ SWAP_WINDOW_MS = 1600.0
 # An early reading stands for the confirmed line only when it saw the whole of it: every text
 # line reaching as far left and right, within this share of a line's height.
 COVER_SLACK = 0.5
+
+
+def same_line(a: str, b: str) -> bool:
+    """Two readings of one line. The picture behind a subtitle changes, the line is lost for a
+    frame and found again, and it is read a little differently the second time ("their.." and
+    "their..."): the same words, not a new line. A line that grew by more than a few letters
+    is a new reading of a longer text and is not the same."""
+    ka, kb = loose_key(a), loose_key(b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    if min(len(ka), len(kb)) < 8 or abs(len(ka) - len(kb)) > 0.12 * max(len(ka), len(kb)):
+        return False
+    return difflib.SequenceMatcher(None, ka, kb).ratio() >= 0.9
 
 
 def covers(early: Block, final: Block) -> bool:
@@ -174,6 +190,7 @@ class Pipeline:
         self.ai_first = False
         self.swap_window_ms = SWAP_WINDOW_MS
         self.swap_late = 0  # answers that came after that window (kept, not drawn)
+        self.repeats = 0  # times the line on the TV was read again and kept its Arabic
         self.ai_wait_ms = AI_WAIT_MS
         self.ai_shown = 0  # lines that went up in the stronger translator's Arabic after waiting
         self.ai_late = 0  # lines whose answer did not come in time (local Arabic shown)
@@ -388,6 +405,14 @@ class Pipeline:
     def _show(self, job: _Job) -> None:
         """Draw a line's Arabic on the TV (called with the lock held)."""
         asked = job.waited  # the stronger translator was already asked about this line
+        # The line on the TV, read again a little differently: it keeps the Arabic it has. A
+        # second translation of the same words made the Arabic change under the player's eyes
+        # (49 of 363 lines in one session log).
+        prev = self._shown_job
+        again = (prev is not None and prev is not job and self._text_up and prev.text_layer is not None
+                 and same_line(prev.english, job.english))
+        if again:
+            job.arabic, job.text_layer, job.source = prev.arabic, prev.text_layer, prev.source
         still_there = self.tracker.shown is not None and mask_iou(self.tracker.shown, job.block) >= SAME_BLOCK_IOU
         frame = self._latest if self._latest is not None else job.frame
         t = time.perf_counter()
@@ -421,11 +446,16 @@ class Pipeline:
             self.held += 1
             self._last_keep = t_sent
         self._last_fill = t_sent
-        self._shown_at = t_sent
-        self._read_ms = reading_time_ms(job.arabic) * self.read_scale
         self._text_layer = job.text_layer
         self._shown_job = job
         self._plate_up = has_plate
+        if again:  # still the same line: its reading time and its place in the lists go on
+            self.repeats += 1
+            self._pending[seq] = {"kind": "again", "t_sent": t_sent, "t_first": job.t_first, "t_stable": job.t_stable,
+                                  "en": job.english}
+            return
+        self._shown_at = t_sent
+        self._read_ms = reading_time_ms(job.arabic) * self.read_scale
         self.lines_shown += 1
         self._pending[seq] = {
             "t_frame": job.t_capture * 1000.0, "t_first": job.t_first, "t_stable": job.t_stable, "t_sent": t_sent,

@@ -491,7 +491,8 @@ def test_the_same_line_back_on_screen_gets_its_arabic_again(ocr):
         # ... and a line that only vanished for two frames is covered again at once
         feed(empty.frame, 3)
         feed(line.frame, 10)
-        assert _wait(lambda: tv.layer_ids() == ["fill", "text"]) and pipe.lines_shown == 3
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"])
+        assert _wait(lambda: pipe.repeats == 1) and pipe.lines_shown == 2  # the same line, with the Arabic it had
         pipe.close()
 
 
@@ -513,3 +514,68 @@ def test_a_scrap_beside_a_well_read_line_does_not_cost_the_sentence():
     assert keep_lines(["GON"], [0.59]) == (["GON"], [0.59])
     assert keep_lines(["a o ss", "KW"], [0.36, 0.33])[1] == [0.36, 0.33]  # nothing well read: nothing rescued
     assert keep_lines([], []) == ([], [])
+
+
+def test_same_line_tells_a_second_reading_from_a_new_line():
+    from tarjim.pipeline import same_line
+
+    assert same_line("What with them out there and their..", "What with them out there and their...")
+    assert same_line("I'm fine, lets go", "l'm fine. Let's go!")
+    assert same_line("Alright, now. Take her down the ramp.", "Alriht, now. Take her dow the ramp.")
+    assert not same_line("Take her down the ramp.", "Take her down the road.")  # short, and a word differs
+    assert not same_line("What with them out there and", "What with them out there and their friends")  # it grew
+    assert not same_line("Yes.", "Yes?") is False  # the same words
+    assert not same_line("No.", "Go.") and not same_line("", "")
+
+
+def test_the_line_on_the_tv_read_again_keeps_its_arabic(ocr):
+    """Lost for a frame and found again, a line was read a little differently and translated a
+    second time: the Arabic changed under the player's eyes."""
+    s = synth.make_samples(1, 1, seed=11)
+    line, empty = s[0], s[1]
+    calls = []
+
+    class CountingEngine:
+        name = "count"
+
+        def translate(self, text, context=None):
+            calls.append(text)
+            return f"ترجمة رقم {len(calls)}."
+
+    class SlippingOcr:  # the second reading loses the last full stop
+        def __init__(self, real):
+            self.real, self.n = real, 0
+
+        def read(self, frame, block):
+            res = self.real.read(frame, block)
+            self.n += 1
+            if self.n > 1:
+                res.text = res.text.rstrip(".")
+            return res
+
+    with FakeTv() as tv, TvLink(tv.host, tv.port) as link:
+        link.connect()
+        pipe = Pipeline(link, CachedTranslator(CountingEngine(), Cache(":memory:")), SlippingOcr(ocr))
+        shown = []
+        pipe.on_line = lambda en, ar: shown.append(ar)
+        t = 100.0
+
+        def feed(frame, n):
+            nonlocal t
+            for _ in range(n):
+                pipe.process(frame, t)
+                t += 1 / 30
+
+        feed(line.frame, 10)
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"])
+        before = np.asarray(tv.composite().convert("RGB"))
+        feed(empty.frame, 3)  # lost for a moment (the Arabic is held on its plate)
+        feed(line.frame, 10)  # found again, and read without its full stop
+        assert _wait(lambda: pipe.repeats == 1)
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"])
+        assert shown == ["ترجمة رقم 1."] and pipe.lines_shown == 1  # one line, one Arabic
+        after = np.asarray(tv.composite().convert("RGB"))
+        x0, y0, x1, y1 = line.bbox
+        text_before, text_after = before[y0 - 60:y1 + 20, x0 - 100:x1 + 100], after[y0 - 60:y1 + 20, x0 - 100:x1 + 100]
+        assert (text_before > 200).sum() == (text_after > 200).sum()  # the same letters are on the TV
+        pipe.close()
