@@ -360,6 +360,11 @@ class LiveSession:
                 fresh.setdefault("font_sizes", {})[profile] = int(value)
                 paths.save_config(fresh)
 
+            from .. import __version__
+
+            # The first line of every session log: which version wrote it, for which game.
+            pipe.log_record({"kind": "start", "version": __version__, "profile": profile,
+                             "background": pipe.background})
             pipe.on_line = on_line
             pipe.on_size_locked = on_size
 

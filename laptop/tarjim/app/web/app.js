@@ -1591,6 +1591,7 @@ async function boot() {
   const helloRes = await fetch(withKey("/api/hello"));
   const hello = await helloRes.json();
   S.remote = !!hello.remote;
+  if (hello.version) $("#ver").textContent = hello.version;
   S.app = hello.app === "phone";
   document.body.classList.toggle("remote", S.remote);
   document.body.classList.toggle("phoneapp", S.app);

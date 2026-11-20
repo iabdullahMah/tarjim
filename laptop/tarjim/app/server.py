@@ -157,6 +157,12 @@ def _xbox_checks(cfg: dict, tv_ip, tv_reach: bool, tv_app: bool, models: bool) -
     }
 
 
+def _version() -> str:
+    from .. import __version__
+
+    return __version__
+
+
 _update_seen: dict = {"at": 0.0, "info": None}
 
 
@@ -690,7 +696,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/hello":
                 return self._json({"tarjim": 1, "remote": self.remote, "name": socket.gethostname(),
                                    "paired": (not self.remote) or access.allowed(self._token()),
-                                   "apk": paths.PHONE_APK.exists()})
+                                   "apk": paths.PHONE_APK.exists(), "version": _version()})
             if url.path == "/tarjim.apk":
                 if not paths.PHONE_APK.exists():
                     return self._send(404, b"not built", "text/plain")

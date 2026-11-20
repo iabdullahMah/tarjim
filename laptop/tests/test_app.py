@@ -167,3 +167,11 @@ def test_http_is_local_only_and_serves_no_files_outside_web(sandbox, monkeypatch
         assert err.value.code == 400
     finally:
         httpd.shutdown()
+
+
+def test_the_page_is_told_which_version_is_running(sandbox):
+    from tarjim import __version__
+
+    assert server._version() == __version__ and __version__.count(".") == 2
+    page = (server.WEB / "index.html").read_text(encoding="utf-8")
+    assert 'id="ver"' in page  # shown beside the name on every page
