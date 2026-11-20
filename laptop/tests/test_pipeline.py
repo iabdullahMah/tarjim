@@ -453,3 +453,43 @@ def test_a_line_that_gets_no_arabic_leaves_its_reason_in_the_log(ocr, tmp_path):
     assert recs[0]["reason"] == "not_speech" and recs[0]["en"] == "OLD TOWN ROAD"
     assert recs[1]["reason"].startswith("error: RuntimeError: engine fell over @ test_pipeline.py:")
     assert recs[1]["en"] == speech.text
+
+
+def test_the_same_line_back_on_screen_gets_its_arabic_again(ocr):
+    """A line said twice in a row, or lost for a moment and found again, used to stay English
+    the second time: its first reading counted as "already shown"."""
+    s = synth.make_samples(1, 1, seed=11)
+    line, empty = s[0], s[1]
+
+    class Engine:
+        name = "one"
+
+        def translate(self, text, context=None):
+            return "سطر."
+
+    with FakeTv() as tv, TvLink(tv.host, tv.port) as link:
+        link.connect()
+        pipe = Pipeline(link, CachedTranslator(Engine(), Cache(":memory:")), ocr)
+        t = 100.0
+
+        def feed(frame, n):
+            nonlocal t
+            for _ in range(n):
+                pipe.process(frame, t)
+                t += 1 / 30
+
+        feed(line.frame, 10)
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"])
+        deadline = time.monotonic() + 8.0
+        while tv.layer_ids() and time.monotonic() < deadline:
+            feed(empty.frame, 1)
+            time.sleep(0.03)
+        assert tv.layer_ids() == []
+        feed(line.frame, 10)
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"])
+        assert pipe.lines_shown == 2
+        # ... and a line that only vanished for two frames is covered again at once
+        feed(empty.frame, 3)
+        feed(line.frame, 10)
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"]) and pipe.lines_shown == 3
+        pipe.close()

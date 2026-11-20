@@ -214,6 +214,35 @@
         </div>
       </div>
 
+      <div class="card" id="gemini-card" hidden>
+        <div class="card-head">
+          <div><h3>ترجمة أذكى مع Gemini</h3>
+          <p class="muted">السطر يطلع فوراً من المترجم المحلي، ثم Gemini يعيد كتابته بمعنى أدق وهو على الشاشة. ترجمته تنحفظ، والمرة الجاية نفس السطر يطلع بها من أول لحظة. يحتاج إنترنت ومفتاح مجاني من Google.</p></div>
+          <span class="muted" id="gemini-state"></span>
+        </div>
+        <ol class="todo">
+          <li><div>افتح <b dir="ltr">aistudio.google.com/apikey</b> في المتصفح وسجّل دخول بحساب Google.</div></li>
+          <li><div>اضغط <b dir="ltr">Create API key</b> وانسخ المفتاح.</div></li>
+          <li><div>الصقه هنا واضغط «جرّب واحفظ».</div></li>
+        </ol>
+        <div class="row">
+          <input class="text ltr wide" id="gemini-key" type="password" autocomplete="off" spellcheck="false" maxlength="200" placeholder="AIza..." aria-label="مفتاح Gemini">
+          <button class="btn" id="gemini-save">جرّب واحفظ</button>
+          <button class="textbtn" id="gemini-forget" hidden>احذف المفتاح</button>
+        </div>
+        <p class="muted" id="gemini-note"></p>
+        <label class="switch"><input type="checkbox" id="gemini-on"><i></i>
+          <span>استخدم Gemini <small>لو طفّيته، الترجمات المحفوظة منه تبقى تطلع. التغيير يبدأ مع الترجمة الجاية.</small></span></label>
+        <div class="field">
+          <div class="field-head"><b>عربي هذي اللعبة</b><span class="muted">لكل لعبة اختيارها</span></div>
+          <div class="seg" id="dialect"><button data-v="msa">فصحى بسيطة</button><button data-v="saudi">عامية سعودية</button></div>
+        </div>
+        <div class="field">
+          <div class="field-head"><b>الموديل</b><span class="muted">اتركه مثل ما هو إلا لو تعرف وش تسوي</span></div>
+          <input class="text ltr" id="gemini-model" maxlength="80" spellcheck="false" aria-label="اسم موديل Gemini">
+        </div>
+      </div>
+
       <div class="card region">
         <div class="card-head">
           <div><h3>وين يقرأ البرنامج؟</h3>

@@ -22,7 +22,7 @@ import numpy as np
 
 from . import paths
 from . import protocol as P
-from .translate import CachedTranslator, TranslateError
+from .translate import CachedTranslator, TranslateError, normalize_english
 from .tvlink import TvLink, TvLinkError, now_ms
 from .vision import render
 from .vision.detect import Block, DetectParams, detect, mask_iou
@@ -108,6 +108,8 @@ class _Job:
     mt_ms: float = 0.0
     render_ms: float = 0.0
     reason: str = ""  # why the line was not shown (for the session log)
+    source: str = ""  # where the Arabic came from (CachedTranslator.last_source)
+    style: render.Style | None = None  # the look it was drawn in
     text_layer: render.RgbaLayer | None = None
 
 
@@ -152,6 +154,13 @@ class Pipeline:
         # It is handed the newest picture and nothing else: the subtitles never wait for it.
         self.screen = None
         self.on_size_locked = None  # optional callback(size) once the font size is fixed
+        # Optional stronger translator (gemini.py) on its own thread. It is told each line that
+        # goes up; when its Arabic arrives while the line is still up, the line is rewritten.
+        self.refiner = None
+        self.on_better = None  # optional callback(english, arabic) when a line was rewritten
+        self.bettered = 0  # lines rewritten in place
+        self._shown_job: _Job | None = None
+        self._plate_up = False
         self._sizes: list[int] = []
         self._lock = threading.RLock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tarjim-work")
@@ -240,8 +249,10 @@ class Pipeline:
         if not self.enabled or self.tracker.is_rejected(block):
             return
         job = self._job
-        if (job is not None and not job.cancelled and mask_iou(job.block, block) >= SAME_BLOCK_IOU
-                and covers(job.block, block)):
+        # A reading that already went up belongs to the line's earlier appearance: the same
+        # line back on screen (said twice, or lost for a moment behind a flash) is read again.
+        if (job is not None and not job.cancelled and not job.shown
+                and mask_iou(job.block, block) >= SAME_BLOCK_IOU and covers(job.block, block)):
             return  # already working on this line
         if job is not None and not job.done:
             return  # busy with another text (typewriter text grows each frame): wait for it
@@ -255,8 +266,10 @@ class Pipeline:
             job.english, job.speaker, job.score = read.text, read.speaker, read.score
             if read.ok and not job.cancelled:
                 job.arabic, job.hit, job.mt_ms = self.translator.translate(read.text)
+                job.source = getattr(self.translator, "last_source", "")
                 t = time.perf_counter()
-                job.text_layer = render.make_text(job.frame, job.block, job.arabic, self._style_for(job.block))
+                job.style = self._style_for(job.block)
+                job.text_layer = render.make_text(job.frame, job.block, job.arabic, job.style)
                 job.render_ms = (time.perf_counter() - t) * 1000.0
                 job.ok = True
             elif not read.ok:
@@ -296,8 +309,8 @@ class Pipeline:
 
     def _on_new(self, frame: np.ndarray, block: Block, t_capture: float) -> None:
         job = self._job
-        if (job is not None and not job.cancelled and mask_iou(job.block, block) >= SAME_BLOCK_IOU
-                and covers(job.block, block)):
+        if (job is not None and not job.cancelled and not job.shown
+                and mask_iou(job.block, block) >= SAME_BLOCK_IOU and covers(job.block, block)):
             job.want_show = True
             job.t_stable = now_ms()
             if job.done:
@@ -360,16 +373,52 @@ class Pipeline:
         self._shown_at = t_sent
         self._read_ms = reading_time_ms(job.arabic) * self.read_scale
         self._text_layer = job.text_layer
+        self._shown_job = job
+        self._plate_up = has_plate
         self.lines_shown += 1
         self._pending[seq] = {
             "t_frame": job.t_capture * 1000.0, "t_first": job.t_first, "t_stable": job.t_stable, "t_sent": t_sent,
             "ocr_ms": round(job.ocr_ms, 1), "mt_ms": round(job.mt_ms, 1), "render_ms": round(job.render_ms, 1),
             "en": job.english, "ar": job.arabic, "speaker": job.speaker, "ocr_score": round(job.score, 3),
             "engine": self.translator.engine.name,
-            "cache_hit": job.hit, "mode": mode if still_there else f"{mode}-late",
+            "cache_hit": job.hit, "mode": mode if still_there else f"{mode}-late", "source": job.source,
         }
         if self.on_line is not None:
             self.on_line(job.english, job.arabic)
+        if self.refiner is not None:
+            # the user's own wording and an answer stored before need no asking again
+            self.refiner.seen(job.english, job.speaker, wanted=job.source not in ("fix", "better"))
+
+    def better_arrived(self, english: str, arabic: str) -> None:
+        """The stronger translator's Arabic for a line (called from its thread). It is stored
+        already; when that line is still the one on the TV, its Arabic is rewritten in place."""
+        with self._lock:
+            job = self._shown_job
+            if (job is None or not self._text_up or not self.enabled or job.text_layer is None
+                    or normalize_english(job.english) != english or arabic == job.arabic):
+                return
+            try:
+                text = render.make_text(job.frame, job.block, arabic, job.style or self.style)
+                layers = []
+                if self._plate_up:
+                    b = None if self._holding else self.tracker.shown
+                    cover = (b.x0, b.y0, b.x1, b.y1) if b is not None else None
+                    layers.append(self._to_overlay(
+                        render.make_plate(text, self._frame_shape, self.plate_opacity, cover=cover), self._frame_shape))
+                layers.append(self._to_overlay(text, self._frame_shape))
+                self.link.show(self.window, layers)  # same layer names: it swaps at once, no fade
+            except TvLinkError:
+                return
+            now = now_ms()
+            after = now - self._shown_at
+            job.arabic, job.text_layer = arabic, text
+            self._text_layer = text
+            # the new wording gets time to be read too
+            self._read_ms = max(self._read_ms, after + 0.7 * reading_time_ms(arabic) * self.read_scale)
+            self.bettered += 1
+            self._write_log({"kind": "better", "en": job.english, "ar": arabic, "after_ms": round(after, 1)})
+        if self.on_better is not None:
+            self.on_better(job.english, arabic)
 
     # -- while a line is up -------------------------------------------------------
 
@@ -404,6 +453,7 @@ class Pipeline:
             # which also hides the next English line until its own Arabic is ready.
             plate = render.make_plate(self._text_layer, self._frame_shape, self.plate_opacity)
             self.link.show(self.window, [self._to_overlay(plate, self._frame_shape)])
+            self._plate_up = True
         if self._uses_fill():
             self.link.clear(["fill"])  # nothing left to cover
         self.link.keep(["text", "plate"])
@@ -425,6 +475,8 @@ class Pipeline:
             self.link.clear(None if self.screen is None else ["fill", "text", "plate"], fade_ms=FADE_OUT_MS)
         self._text_up = False
         self._holding = False
+        self._plate_up = False
+        self._shown_job = None
 
     def log_record(self, rec: dict) -> None:
         """A line of the session log from another thread (screen text)."""
@@ -482,6 +534,8 @@ class Pipeline:
             self._log.flush()
 
     def close(self) -> None:
+        if self.refiner is not None:
+            self.refiner.close()
         if self.screen is not None:
             try:
                 self.screen.close()

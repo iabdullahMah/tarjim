@@ -584,6 +584,69 @@ async function loadProfile() {
   renderNames();
   refreshPreview();
   UI.ranges();
+  loadGemini();
+}
+
+/* ---- the stronger translator (Gemini): the key, the switch, each game's Arabic ---- */
+const GEMINI_STATE = { ok: "شغّال ✓", waiting: "خلص الحد حالياً، يرجع لحاله", bad_key: "المفتاح مرفوض" };
+function showGemini(g) {
+  S.gemini = g;
+  $("#gemini-card").hidden = false;
+  $("#gemini-on").checked = g.enabled;
+  $("#gemini-on").disabled = !g.has_key;
+  $("#gemini-model").value = g.model;
+  $("#gemini-forget").hidden = !g.has_key;
+  $("#gemini-key").placeholder = g.has_key ? `محفوظ (آخره ${g.tail || "…"})` : "AIza...";
+  $("#gemini-note").textContent = g.stored ? `محفوظ من Gemini: ${g.stored} سطر.` : "";
+  const st = g.status;
+  $("#gemini-state").textContent = !g.has_key ? "ما فيه مفتاح" : !g.enabled ? "مطفي"
+    : st ? `${GEMINI_STATE[st.state] || ""}${st.done ? ` · ${st.done} سطر` : ""}` : "جاهز";
+}
+async function loadGemini() {
+  if (S.remote || S.app) return;  // the key is typed on the laptop only
+  let g;
+  try { g = await api("/api/gemini"); } catch { return; }
+  showGemini(g);
+  $$("#dialect button").forEach(b => {
+    b.classList.toggle("on", b.dataset.v === S.profile.dialect);
+    b.onclick = () => {
+      $$("#dialect button").forEach(x => x.classList.toggle("on", x === b));
+      save({ dialect: b.dataset.v });
+    };
+  });
+  $("#gemini-save").onclick = async () => {
+    const key = $("#gemini-key").value.trim(), model = $("#gemini-model").value.trim();
+    if (!key && !g.has_key) return toast("الصق المفتاح أول.");
+    const btn = $("#gemini-save");
+    btn.disabled = true;
+    try {
+      const r = await api("/api/gemini/test", { key, model });
+      if (!r.ok) return toast(r.error);
+      const body = { model, enabled: true };
+      if (key) body.key = key;
+      g = await api("/api/gemini", body);
+      $("#gemini-key").value = "";
+      showGemini(g);
+      toast(`المفتاح شغّال ✓ «${r.sample}»`);
+    } catch (e) { toast(e.message); } finally { btn.disabled = false; }
+  };
+  $("#gemini-on").onchange = async e => {
+    try { showGemini(g = await api("/api/gemini", { enabled: e.target.checked })); toast("انحفظ ✓"); } catch (err) { toast(err.message); }
+  };
+  $("#gemini-forget").onclick = async () => {
+    if (!await ask("حذف المفتاح", "ينحذف المفتاح من هذا اللابتوب. الترجمات المحفوظة تبقى.", "احذف")) return;
+    try { showGemini(g = await api("/api/gemini", { key: "" })); } catch (err) { toast(err.message); }
+  };
+}
+/* A line Gemini rewrote: the list and the big second-screen line take its new Arabic. */
+function betterLine(item) {
+  for (const li of $$("#feed li")) {
+    if ($(".en", li)?.textContent === item.en && $(".ar", li)) { $(".ar", li).textContent = item.ar; break; }
+  }
+  if ($("#second-en").textContent === item.en) {
+    $("#second-ar").textContent = item.ar;
+    $("#rest-line").textContent = item.ar;
+  }
 }
 $("#preview-text").addEventListener("input", refreshPreview);
 
@@ -1357,7 +1420,12 @@ function connect() {
     if (was === "starting" && S.live.state === "running") { S.latencies = []; drawSpark(); toast("الترجمة شغّالة ✓"); }
   });
   es.addEventListener("line", e => addLine(JSON.parse(e.data)));
-  es.addEventListener("stats", e => renderStats(JSON.parse(e.data)));
+  es.addEventListener("stats", e => {
+    const st = JSON.parse(e.data);
+    renderStats(st);
+    if (S.gemini && st.gemini) showGemini({ ...S.gemini, status: st.gemini });
+  });
+  es.addEventListener("better", e => betterLine(JSON.parse(e.data)));
   // The Xbox picture is received by the program's own window: start and stop it with the session.
   es.addEventListener("xbox", e => {
     if (S.remote) return;

@@ -99,6 +99,7 @@ class LiveSession:
         self._pipe = None
         self._ocr = None
         self._ocr_screen = None  # screen text's own reader (GTA VI), never shared with the subtitles
+        self.refiner = None  # the stronger translator beside the local one (gemini.py), while running
         self._engines: dict[str, object] = {}
         self._lock = threading.Lock()
 
@@ -182,6 +183,13 @@ class LiveSession:
             pipe.detect_params = settings.detect_params(prof)
             pipe.translator.glossary = {str(k): str(v) for k, v in (prof.get("glossary") or {}).items()}
             pipe.translator.female = {str(n) for n in (prof.get("female") or [])}
+            from .. import gemini
+
+            pipe.translator.dialect = gemini.dialect_of(name, prof)
+            if pipe.refiner is not None:
+                pipe.refiner.dialect = pipe.translator.dialect
+                pipe.refiner.glossary = dict(pipe.translator.glossary)
+                pipe.refiner.female = set(pipe.translator.female)
             if pipe.screen is not None:  # the switch works while translating
                 from .. import gta6
 
@@ -308,6 +316,26 @@ class LiveSession:
             pipe.on_line = on_line
             pipe.on_size_locked = on_size
 
+            from .. import gemini
+
+            translator.dialect = gemini.dialect_of(profile, prof)
+            g = gemini.settings()
+            if g["key"] and g["enabled"]:
+                # A stronger translator beside the local one, with the user's own key. The local
+                # Arabic still goes up first; its answer rewrites the line and is kept for next time.
+                def on_better(en: str, ar: str) -> None:
+                    for item in self.lines:
+                        if item["en"] == en:
+                            item["ar"] = ar
+                    self.hub.publish("better", {"en": en, "ar": ar})
+
+                refiner = gemini.Refiner(Cache(), profile, key=g["key"], model=g["model"],
+                                         title=str(prof.get("title") or ""), dialect=translator.dialect,
+                                         glossary=glossary, female={str(n) for n in (prof.get("female") or [])})
+                refiner.on_better = pipe.better_arrived
+                pipe.on_better = on_better
+                pipe.refiner = self.refiner = refiner
+
             from .. import gta6
 
             if gta6.screen_text_on(profile, prof):
@@ -344,6 +372,7 @@ class LiveSession:
                         "fps": round(info.fps), "reconnects": info.reconnects, "lines": pipe.lines_shown,
                         "latency_ms": round(statistics.median(recent)) if recent else None,
                         "width": info.width, "height": info.height, "on_battery": paths.on_battery(),
+                        "gemini": pipe.refiner.status() if pipe.refiner is not None else None,
                     }
                     self.hub.publish("stats", self.stats)
             if first and not self._stop.is_set():
@@ -366,6 +395,7 @@ class LiveSession:
                 self.hub.publish("xbox", {"action": "stop"})
             self._source = None
             self._pipe = None
+            self.refiner = None
             self._set("idle", "", error)
 
 

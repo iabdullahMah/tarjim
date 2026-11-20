@@ -672,6 +672,13 @@ class Cache:
             self._db.executemany("UPDATE fix SET sk=? WHERE profile=? AND en=?",
                                  [(loose_key(en), profile, en) for profile, en in old])
         self._db.execute("CREATE INDEX IF NOT EXISTS fix_sk ON fix (profile, sk)")
+        # A stronger translator's Arabic for a line (gemini.py), kept for the next time it appears.
+        # `style` is the Arabic it was written in (Standard or colloquial).
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS better (profile TEXT, en TEXT, style TEXT, ar TEXT, model TEXT, ts REAL,"
+            " sk TEXT, PRIMARY KEY (profile, en, style))"
+        )
+        self._db.execute("CREATE INDEX IF NOT EXISTS better_sk ON better (profile, style, sk)")
         # How the engine writes a glossary name on its own (see NameGuard).
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS names (engine TEXT, en TEXT, mode TEXT, variant TEXT,"
@@ -695,6 +702,37 @@ class Cache:
                 "SELECT DISTINCT ar FROM fix WHERE profile=? AND sk=? LIMIT 2", (profile, sk)
             ).fetchall()
         return rows[0][0] if len(rows) == 1 else None
+
+    def get_better(self, profile: str, en: str, style: str) -> str | None:
+        """The stronger translator's stored Arabic for this line, or for the same line read a
+        little differently (as get_fix_loose: never a guess between two)."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT ar FROM better WHERE profile=? AND en=? AND style=?", (profile, en, style)
+            ).fetchone()
+            if row:
+                return row[0]
+            sk = loose_key(en)
+            if not sk:
+                return None
+            rows = self._db.execute(
+                "SELECT DISTINCT ar FROM better WHERE profile=? AND style=? AND sk=? LIMIT 2", (profile, style, sk)
+            ).fetchall()
+        return _end_like(rows[0][0], en) if len(rows) == 1 else None
+
+    def put_better(self, profile: str, en: str, style: str, ar: str, model: str = "") -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO better (profile, en, style, ar, model, ts, sk) VALUES (?,?,?,?,?,?,?)",
+                (profile, en, style, ar, model, time.time(), loose_key(en)),
+            )
+            self._db.commit()
+
+    def count_better(self, profile: str | None = None) -> int:
+        with self._lock:
+            if profile is None:
+                return int(self._db.execute("SELECT COUNT(*) FROM better").fetchone()[0])
+            return int(self._db.execute("SELECT COUNT(*) FROM better WHERE profile=?", (profile,)).fetchone()[0])
 
     def put_fix(self, profile: str, en: str, ar: str | None) -> None:
         """Store the user's own Arabic for a line; None or empty removes it."""
@@ -1333,6 +1371,11 @@ class CachedTranslator:
         self.glossary = glossary or {}
         self.female = set(female or ())  # glossary names that belong to women
         self.names = NameGuard(engine, cache)
+        # The Arabic stored answers of the stronger translator are looked up in ("msa", "saudi").
+        self.dialect = "msa"
+        # Where the last line's Arabic came from: "fix" (the user's own), "better" (a stored
+        # answer of the stronger translator), "cache" or "engine".
+        self.last_source = ""
         self.history: list[tuple[str, str]] = []
 
     @property
@@ -1481,12 +1524,19 @@ class CachedTranslator:
             if fixed is not None:
                 fixed = _end_like(fixed, key)
         if fixed is not None:
+            self.last_source = "fix"
             return fixed, True, (time.perf_counter() - t0) * 1000.0
+        better = self.cache.get_better(self.profile, key, self.dialect)
+        if better is not None:
+            self.last_source = "better"
+            return better, True, (time.perf_counter() - t0) * 1000.0
         matched = self._matched(key)
         engine_key = self._engine_key(matched)
         hit = self.cache.get(self.profile, key, engine_key, self.style)
         if hit is not None:
+            self.last_source = "cache"
             return hit, True, (time.perf_counter() - t0) * 1000.0
+        self.last_source = "engine"
         src = terms.rewrite(key, self.series)  # game words in plain English
         if matched:
             raw = self._translate_with_names(src, matched)

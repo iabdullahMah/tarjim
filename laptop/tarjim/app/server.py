@@ -40,7 +40,8 @@ _remote_lock = threading.Lock()
 
 # What a paired phone may not do: these need the laptop itself (a browser, the TV setup, the app's life).
 LOCAL_ONLY = ("/api/quit", "/api/focus", "/api/ps5/", "/api/tv/setup", "/api/tv/revert", "/api/tv/test",
-              "/api/phone", "/api/guide-seen", "/api/xbox", "/api/console", "/v5/", "/v6/")
+              "/api/phone", "/api/guide-seen", "/api/xbox", "/api/console", "/v5/", "/v6/",
+              "/api/gemini")  # the key is typed on the laptop only
 
 _xbox_auth = None
 
@@ -155,8 +156,55 @@ def _xbox_checks(cfg: dict, tv_ip, tv_reach: bool, tv_app: bool, models: bool) -
     }
 
 
+def gemini_view() -> dict:
+    """The stronger translator's settings for the page. The key itself never leaves the laptop:
+    the page is told only that there is one, and its last four characters."""
+    from .. import gemini
+    from ..translate import Cache
+
+    g = gemini.settings()
+    cache = Cache()
+    try:
+        stored = cache.count_better()
+    finally:
+        cache.close()
+    refiner = live.refiner
+    return {
+        "has_key": bool(g["key"]), "tail": g["key"][-4:] if len(g["key"]) >= 12 else "",
+        "enabled": g["enabled"], "model": g["model"], "default_model": gemini.DEFAULT_MODEL,
+        "stored": stored, "status": refiner.status() if refiner is not None else None,
+    }
+
+
+def gemini_save(body: dict) -> dict:
+    from .. import gemini
+
+    key = body.get("key")
+    gemini.save_settings(
+        key=str(key) if key is not None else None,
+        enabled=bool(body["enabled"]) if "enabled" in body else None,
+        model=str(body["model"]) if "model" in body else None,
+    )
+    return gemini_view()
+
+
+def gemini_test(body: dict) -> dict:
+    """Try the key (the one typed now, else the saved one) with one small line."""
+    from .. import gemini
+
+    g = gemini.settings()
+    key = str(body.get("key") or "").strip() or g["key"]
+    model = str(body.get("model") or "").strip() or g["model"]
+    if not key:
+        return {"ok": False, "error": "اكتب المفتاح أول."}
+    try:
+        return {"ok": True, "sample": gemini.check(key, model)}
+    except gemini.GeminiError as exc:
+        return {"ok": False, "error": gemini.friendly(exc)}
+
+
 def profile_view(name: str) -> dict:
-    from .. import settings
+    from .. import gemini, settings
     from .. import gta6
     from ..translate import load_profile
 
@@ -180,6 +228,7 @@ def profile_view(name: str) -> dict:
         "read_scale": float(prof.get("read_scale", 1.0)),
         "settle_ms": float(prof.get("settle_ms", 60)),
         "style": prof.get("style", "msa"),
+        "dialect": gemini.dialect_of(name, prof),  # the Arabic the stronger translator writes for this game
         # GTA VI's menus and messages (screen_text.py): None for every other game
         "screen_text": gta6.screen_text_on(name, prof) if gta6.is_gta6(name, str(prof.get("title") or "")) else None,
     }
@@ -243,6 +292,8 @@ def profile_save(body: dict) -> dict:
         prof["settle_ms"] = max(0.0, min(600.0, float(body["settle_ms"])))
     if "screen_text" in body:
         prof["screen_text"] = bool(body["screen_text"])
+    if body.get("dialect") in ("msa", "saudi"):
+        prof["dialect"] = body["dialect"]
     save_profile(name, prof)
     live.apply_profile(name)  # a running session picks the new look up at once
     return profile_view(name)
@@ -555,6 +606,8 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if url.path == "/api/check":
                 return self._json(checks())
+            if url.path == "/api/gemini":
+                return self._json(gemini_view())
             if url.path == "/api/profile":
                 return self._json(profile_view(q.get("name", "default")))
             if url.path == "/api/packs":
@@ -721,6 +774,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if path == "/api/profile":
                 return self._json(profile_save(body))
+            if path == "/api/gemini":
+                return self._json(gemini_save(body))
+            if path == "/api/gemini/test":
+                return self._json(gemini_test(body))
             if path == "/api/profile/new":
                 from ..translate import save_profile
 
