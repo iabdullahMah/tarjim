@@ -374,3 +374,20 @@ def test_a_key_given_while_translating_is_used_at_once(sandbox, google, monkeypa
     assert "AIzaSy" not in json.dumps(logged, default=str)
     session.state = "idle"
     assert session.apply_gemini() is False
+
+
+def test_the_gap_widens_when_refused_for_quota_and_eases_back(google, monkeypatch):
+    monkeypatch.setattr(gemini, "EASE_AFTER", 2)
+    google.plan = [429, 429]
+    r = refiner(google, Cache(":memory:"), gap_s=0.02, pauses_s=(0.02,))
+    assert r.status()["gap_s"] == 0.0 and r.gap_s == 0.02
+    r.seen("The first line that was said here.")
+    assert _wait(lambda: r.status()["done"] == 1)
+    widened = r.gap_s
+    assert widened >= 2.0 and widened <= gemini.GAP_MAX_S  # doubled at each refusal, from at least a second
+    r.gap_s = 0.05  # (so the test need not wait out the real gap)
+    for i in range(4):
+        r.seen(f"Another line number {i} was said, one at a time.")
+        assert _wait(lambda: r.status()["done"] == i + 2)
+    assert r.gap_s < 0.05 and r.gap_s >= r.min_gap_s  # answered again and again: shorter, never under the start
+    r.close()

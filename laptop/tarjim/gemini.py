@@ -32,13 +32,18 @@ from .translate import Cache, loose_key, normalize_arabic, normalize_english
 API = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DIALECTS = ("msa", "saudi")
-GAP_S = 5.0  # between two requests: a free key allows about ten a minute
+# Between two requests. It starts short, so most lines are rewritten while still on the TV
+# (a game says a line every three seconds or so); each time the service refuses for quota it
+# doubles, up to GAP_MAX_S, and it comes back down slowly while requests are answered.
+GAP_S = 2.0
+GAP_MAX_S = 20.0
+EASE_AFTER = 10  # answered requests in a row before the gap is shortened again
 BATCH = 8  # lines in one request at most
 BACKLOG = 400  # lines kept waiting while requests are refused
 CONTEXT = 4  # earlier lines given with a request, so "he", "it" and the tone are understood
 TIMEOUT_S = 8.0
 MIN_LETTERS = 4  # shorter lines ("No.", "OK") are left to the local engine and its phrase list
-PAUSES_S = (30.0, 120.0, 600.0, 1800.0)  # after one refusal, after the next one, ...
+PAUSES_S = (10.0, 30.0, 120.0, 600.0, 1800.0)  # after one refusal, after the next one, ...
 
 _STYLE = {
     "msa": (
@@ -48,7 +53,9 @@ _STYLE = {
     "saudi": (
         "Write Saudi colloquial Arabic (the everyday Najdi/white dialect young Saudis speak and "
         "write): «وش»، «ليش»، «أبي»، «الحين»، «مو»، «يلا». Natural and short, the way a "
-        "friend would say it, never Standard Arabic and never word for word."
+        "friend would say it, never Standard Arabic and never word for word. Swearing is in the "
+        "same dialect too, and the same word each time for the same English one (never the "
+        "Standard «تباً» or «اللعنة» in the middle of colloquial speech)."
     ),
 }
 _RULES = (
@@ -57,6 +64,9 @@ _RULES = (
     "{style}\n"
     "- Translate the meaning. Idioms, slang and jokes get their Arabic sense, not their words.\n"
     "- Keep swearing as strong as the original; do not soften it and do not add any.\n"
+    "- Say what the line says: never put another word in a word's place because it sounds "
+    "close (\"bury\" is to put in a grave, not to forgive). A sound of worry or surprise "
+    "(\"Uh-oh\", \"Whoa\", \"Huh\") stays one, it does not become \"OK\".\n"
     "- Use the Arabic spelling given for each name, exactly. Other names are written in Arabic "
     "letters by their sound.\n"
     "- The one spoken to is a man unless the line, the names marked (woman) or the earlier lines "
@@ -225,7 +235,9 @@ class Refiner:
         self.glossary = dict(glossary or {})
         self.female = set(female or ())
         self.base = base
-        self.gap_s = gap_s
+        self.gap_s = gap_s  # the gap now; it moves between min_gap_s and GAP_MAX_S
+        self.min_gap_s = gap_s
+        self._answered = 0  # requests answered in a row
         self.pauses_s = pauses_s
         self.on_better = None  # callback(english, arabic) when a line's better Arabic arrives
         self.log = None  # callback(record) for the session log: each change of state, never the key
@@ -265,7 +277,8 @@ class Refiner:
 
     def status(self) -> dict:
         with self._lock:
-            return {"state": self.state, "done": self.done, "waiting": len(self._todo), "error": self.error}
+            return {"state": self.state, "done": self.done, "waiting": len(self._todo), "error": self.error,
+                    "gap_s": round(self.gap_s, 1)}
 
     def close(self) -> None:
         with self._lock:
@@ -315,6 +328,9 @@ class Refiner:
             with self._lock:
                 was = self.state if self.requests > 1 else ""
                 self.state, self.error, self._refusals = "ok", "", 0
+                self._answered += 1
+                if self._answered % EASE_AFTER == 0 and self.gap_s > self.min_gap_s:
+                    self.gap_s = max(self.min_gap_s, self.gap_s * 0.8)
                 self._not_before = time.monotonic() + self.gap_s
             if was != "ok":
                 self._note({"state": "ok", "lines": len(batch)})  # the first answer, or back after a refusal
@@ -343,7 +359,8 @@ class Refiner:
                 pass
 
     def _failed(self, batch: list[dict], exc: GeminiError) -> None:
-        self._note({"state": "failed", "why": exc.kind, "detail": exc.detail, "lines": len(batch)})
+        self._note({"state": "failed", "why": exc.kind, "detail": exc.detail, "lines": len(batch),
+                    "gap_s": round(self.gap_s, 1)})
         with self._lock:
             self.error = friendly(exc)
             if exc.kind == "bad":  # these lines will not do better a second time
@@ -354,6 +371,9 @@ class Refiner:
             if exc.kind == "key":
                 self.state = "bad_key"
                 return
+            if exc.kind == "quota":  # asked too often for this key: ask less often from now on
+                self._answered = 0
+                self.gap_s = min(GAP_MAX_S, max(self.gap_s * 2.0, self.min_gap_s, 1.0))
             pause = self.pauses_s[min(self._refusals, len(self.pauses_s) - 1)] if self.pauses_s else self.gap_s
             self._refusals += 1
             self.state = "waiting"

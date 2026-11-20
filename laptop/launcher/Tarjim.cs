@@ -17,8 +17,8 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyDescription("Arabic subtitles over PS5 games")]
 [assembly: AssemblyCompany("Tarjim")]
 [assembly: AssemblyCopyright("Copyright 2026 Tarjim")]
-[assembly: AssemblyVersion("0.5.2.0")]
-[assembly: AssemblyFileVersion("0.5.2.0")]
+[assembly: AssemblyVersion("0.5.3.0")]
+[assembly: AssemblyFileVersion("0.5.3.0")]
 
 static class Program
 {
