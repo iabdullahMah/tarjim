@@ -43,7 +43,12 @@ FADE_OUT_MS = 140
 SIZE_LOCK_AFTER = 5  # lines measured before the Arabic font size is fixed for good
 # With "wait for the stronger translator" on, a line is held back this long at most for its
 # answer; after that the local Arabic goes up, so a slow or silent service never costs a line.
-AI_WAIT_MS = 1800.0
+AI_WAIT_MS = 1200.0
+# Without that wait, a line goes up at once in the local Arabic and is rewritten when the
+# stronger translator answers, but only this soon after it went up: later the player has read
+# it, and a change then reads as the same line translated twice. A later answer is kept for
+# the next time only.
+SWAP_WINDOW_MS = 1600.0
 # An early reading stands for the confirmed line only when it saw the whole of it: every text
 # line reaching as far left and right, within this share of a line's height.
 COVER_SLACK = 0.5
@@ -167,6 +172,8 @@ class Pipeline:
         # answer instead of going up in the local Arabic first and changing a second later.
         # The local Arabic is then only what is shown when no answer comes in time.
         self.ai_first = False
+        self.swap_window_ms = SWAP_WINDOW_MS
+        self.swap_late = 0  # answers that came after that window (kept, not drawn)
         self.ai_wait_ms = AI_WAIT_MS
         self.ai_shown = 0  # lines that went up in the stronger translator's Arabic after waiting
         self.ai_late = 0  # lines whose answer did not come in time (local Arabic shown)
@@ -457,6 +464,9 @@ class Pipeline:
             if self.ai_first:
                 return  # one Arabic per line: an answer that came late is kept for next time only
             job = self._shown_job
+            if job is not None and self._text_up and now_ms() - self._shown_at > self.swap_window_ms:
+                self.swap_late += 1
+                return
             if (job is None or not self._text_up or not self.enabled or job.text_layer is None
                     or normalize_english(job.english) != english or arabic == job.arabic):
                 return

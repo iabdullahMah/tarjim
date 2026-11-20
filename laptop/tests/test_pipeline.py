@@ -493,3 +493,23 @@ def test_the_same_line_back_on_screen_gets_its_arabic_again(ocr):
         feed(line.frame, 10)
         assert _wait(lambda: tv.layer_ids() == ["fill", "text"]) and pipe.lines_shown == 3
         pipe.close()
+
+
+def test_a_scrap_beside_a_well_read_line_does_not_cost_the_sentence():
+    """A session log showed sentences read perfectly and still rejected: a mark the game draws
+    under its subtitle was read as a second "line" of two or three bad characters, and the
+    block was judged by its worst line."""
+    from tarjim.vision.ocr import keep_lines
+
+    sentence = "Can you help move things along without him."
+    assert keep_lines([sentence, "KW"], [0.99, 0.33]) == ([sentence], [0.99])
+    assert keep_lines([sentence, ""], [0.99, 0.0]) == ([sentence], [0.99])
+    assert keep_lines(["V", sentence], [0.18, 0.97]) == ([sentence], [0.97])
+    # two real lines stay two lines, also when the second is short or read less surely
+    assert keep_lines(["Now listen carefully, because I will", "not say it twice."], [0.98, 0.95])[0][1] == "not say it twice."
+    assert keep_lines([sentence, "Right?"], [0.99, 0.80]) == ([sentence, "Right?"], [0.99, 0.80])
+    # a badly read long line is still a bad reading, and a scrap alone is still rejected
+    assert keep_lines([sentence, "sme ng lse tht ws sad hre"], [0.99, 0.30])[1] == [0.99, 0.30]
+    assert keep_lines(["GON"], [0.59]) == (["GON"], [0.59])
+    assert keep_lines(["a o ss", "KW"], [0.36, 0.33])[1] == [0.36, 0.33]  # nothing well read: nothing rescued
+    assert keep_lines([], []) == ([], [])

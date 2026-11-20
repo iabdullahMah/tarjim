@@ -183,6 +183,31 @@ def test_the_switch_is_on_by_default_and_saved(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     monkeypatch.setattr(paths, "CONFIG_FILE", tmp_path / "home" / "config.json")
     monkeypatch.setattr(paths, "REPO", repo)
-    assert server.gemini_view()["wait"] is True
-    assert server.gemini_save({"wait": False})["wait"] is False and gemini.settings()["wait"] is False
-    assert server.gemini_save({"enabled": True})["wait"] is False  # another change leaves it as it is
+    assert server.gemini_view()["wait"] is False  # off unless chosen: with fast speech it cost lines
+    assert server.gemini_save({"wait": True})["wait"] is True and gemini.settings()["wait"] is True
+    assert server.gemini_save({"enabled": True})["wait"] is True  # another change leaves it as it is
+
+
+def test_an_answer_that_comes_after_the_line_was_read_is_kept_but_not_drawn(google, ocr, tmp_path):
+    """Without the wait, a line goes up at once and is rewritten when the answer comes soon.
+    An answer that comes later changes nothing on the TV: by then the line has been read."""
+    line = synth.make_samples(1, 0, seed=11)[0]
+    hold = threading.Event()
+    with FakeTv() as tv, TvLink(tv.host, tv.port) as link:
+        link.connect()
+        pipe, r, shown = make(google, link, ocr, tmp_path, hold=hold)
+        pipe.ai_first = False
+        pipe.swap_window_ms = 200.0
+        feed = feeder(pipe)
+        feed(line.frame, 10)
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"])
+        assert shown == ["ترجمة محلية."]  # at once, in the local Arabic
+        before = tv.composite().tobytes()
+        time.sleep(0.4)  # the answer comes after the window
+        hold.set()
+        assert _wait(lambda: r.status()["done"] == 1)
+        feed(line.frame, 4)
+        time.sleep(0.2)
+        assert tv.composite().tobytes() == before and pipe.bettered == 0 and pipe.swap_late == 1
+        assert pipe.translator.translate(line.text)[0] == "أذكى 1: سطر عربي."  # kept for the next time
+        pipe.close()

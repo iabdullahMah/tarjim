@@ -40,10 +40,13 @@ DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DIALECTS = ("msa", "saudi")
 # Between two requests. It starts short, so most lines are rewritten while still on the TV
 # (a game says a line every three seconds or so); each time the service refuses for quota it
-# doubles, up to GAP_MAX_S, and it comes back down slowly while requests are answered.
+# grows by half, up to GAP_MAX_S, and it comes back down while requests are answered. (Doubling
+# overshot: a session showed one key pushed from 2 s to 16 s by four refusals in a row.)
 GAP_S = 2.0
 GAP_MAX_S = 20.0
-EASE_AFTER = 10  # answered requests in a row before the gap is shortened again
+EASE_AFTER = 4  # answered requests in a row before the gap is shortened again
+GAP_UP = 1.5  # how much longer the gap gets at a refusal ...
+GAP_DOWN = 0.85  # ... and how much shorter after EASE_AFTER answers
 BATCH = 8  # lines in one request at most
 BACKLOG = 400  # lines kept waiting while requests are refused
 CONTEXT = 4  # earlier lines given with a request, so "he", "it" and the tone are understood
@@ -108,9 +111,10 @@ def settings() -> dict:
     return {
         "key": str(raw.get("key") or "").strip(),
         "enabled": bool(raw.get("enabled", True)),
-        # hold a line back for the stronger translator's answer instead of showing the local
-        # Arabic first and changing it a second later
-        "wait": bool(raw.get("wait", True)),
+        # Hold a line back for the stronger translator's answer instead of showing the local
+        # Arabic first. Off unless chosen: in a session with fast speech it showed four lines in
+        # ten after their English had left, and every line a second later (0.94 s, from 0.14).
+        "wait": bool(raw.get("wait", False)),
         "model": str(raw.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL,
     }
 
@@ -517,7 +521,7 @@ class Refiner:
                 p.state, p.error, p.refusals = "ok", "", 0
                 p.answered += 1
                 if p.answered % EASE_AFTER == 0 and p.gap_s > p.min_gap_s:
-                    p.gap_s = max(p.min_gap_s, p.gap_s * 0.8)
+                    p.gap_s = max(p.min_gap_s, p.gap_s * GAP_DOWN)
                 p.not_before = time.monotonic() + p.gap_s
             if was != "ok":
                 self._note(p, {"state": "ok", "lines": len(batch)})  # the first answer, or back after a refusal
@@ -560,7 +564,7 @@ class Refiner:
             else:
                 if exc.kind == "quota":  # asked too often for this key: ask less often from now on
                     p.answered = 0
-                    p.gap_s = min(GAP_MAX_S, max(p.gap_s * 2.0, p.min_gap_s, 1.0))
+                    p.gap_s = min(GAP_MAX_S, max(p.gap_s * GAP_UP, p.min_gap_s, 1.0))
                 pause = self.pauses_s[min(p.refusals, len(self.pauses_s) - 1)] if self.pauses_s else p.gap_s
                 p.refusals += 1
                 p.state = "waiting"

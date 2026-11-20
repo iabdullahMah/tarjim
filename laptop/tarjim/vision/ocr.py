@@ -42,6 +42,22 @@ def looks_like_subtitle(text: str) -> bool:
     return latin / len(letters) >= 0.7
 
 
+def keep_lines(lines: list[str], scores: list[float]) -> tuple[list[str], list[float]]:
+    """Leave out what is not part of the sentence: an empty reading, or a few badly read
+    characters on a line of their own beside a well read line (a button picture or a mark the
+    game draws under its subtitle). The whole block used to be judged by its worst line, so one
+    such scrap ("KW", "21", "V") made a perfectly read sentence count as unreadable and it got
+    no Arabic at all. A scrap that is all there is stays, and is rejected as before."""
+    pairs = [(t, s) for t, s in zip(lines, scores) if t.strip()]
+    if not pairs:
+        return [], []
+    longest = max(len(t.strip()) for t, _ in pairs)
+    good = [(t, s) for t, s in pairs if not (s < MIN_SCORE and len(t.strip()) <= max(6, 0.3 * longest))]
+    if good and len(good) < len(pairs) and all(s >= MIN_SCORE for _, s in good):
+        pairs = good
+    return [t for t, _ in pairs], [s for _, s in pairs]
+
+
 def join_lines(lines: list[str]) -> str:
     out = ""
     for line in (l.strip() for l in lines):
@@ -108,6 +124,8 @@ class OcrEngine:
             y0, y1 = max(0, ln.y0 - pad), min(fh, ln.y1 + pad)
             x0, x1 = max(0, lx0 - pad), min(fw, lx1 + pad)
             crop = frame_bgr[y0:y1, x0:x1]
+            if crop.shape[0] < 2 or crop.shape[1] < 2:
+                continue  # nothing to read (a line box at the very edge of the picture)
             scale = TARGET_LINE_H / max(1, crop.shape[0])
             interp = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
             colour = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=interp)
@@ -115,13 +133,15 @@ class OcrEngine:
             if score < 0.85:
                 # Second opinion: a clean black-on-white render of the stroke mask.
                 m = block.mask[y0 - block.y0 : y1 - block.y0, x0 - block.x0 : x1 - block.x0]
-                if m.size and m.shape[0] > 0 and m.shape[1] > 0:
+                # (a mask a pixel or two wide scales to nothing, and resizing to nothing raises)
+                if m.size and m.shape[0] * scale >= 1 and m.shape[1] * scale >= 1:
                     clean = cv2.resize(255 - m, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
                     t2, s2 = self._read_line(cv2.cvtColor(clean, cv2.COLOR_GRAY2BGR))
                     if s2 > score:
                         text, score = t2, s2
             lines.append(text)
             scores.append(score)
+        lines, scores = keep_lines(lines, scores)
         joined = join_lines(lines)
         speaker, body = split_speaker(joined)
         return OcrResult(body, lines, min(scores) if scores else 0.0, speaker)
