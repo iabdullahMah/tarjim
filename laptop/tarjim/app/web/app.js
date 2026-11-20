@@ -638,6 +638,36 @@ async function loadGemini() {
     try { showGemini(g = await api("/api/gemini", { key: "" })); } catch (err) { toast(err.message); }
   };
 }
+/* ---- small updates: only what changed is downloaded (tarjim/update.py) ---- */
+async function checkUpdate() {
+  if (S.remote || S.app || S.still) return;  // the laptop's own window only
+  let u;
+  try { u = await api("/api/update"); } catch { return; }
+  if (!u.available) return;
+  const bar = $("#update-bar"), go = $("#update-go");
+  const mb = u.size ? ` (${Math.max(1, Math.round(u.size / 1e6))} ميقا)` : "";
+  bar.hidden = false;
+  $("#update-later").onclick = () => { bar.hidden = true; };
+  if (u.needs_installer) {
+    $("#update-text").textContent = `النسخة ${u.latest} نزلت، وتحتاج ملف التثبيت الكامل هالمرة.`;
+    go.textContent = "افتح صفحة التحميل";
+    go.onclick = () => window.open(u.page, "_blank");
+    return;
+  }
+  $("#update-text").textContent = `تحديث جديد: ${u.latest}${mb}`;
+  go.onclick = async () => {
+    go.disabled = true;
+    $("#update-text").textContent = "أنزّل التحديث…";
+    try {
+      const r = await api("/api/update/apply", {});
+      if (!r.ok) { $("#update-text").textContent = r.error; go.disabled = false; return; }
+      $("#update-text").textContent = `تم التحديث إلى ${r.version}. اقفل ترجِم وافتحه من جديد.`;
+      go.hidden = true;
+      $("#update-later").textContent = "تمام";
+    } catch (e) { $("#update-text").textContent = e.message; go.disabled = false; }
+  };
+}
+
 /* A line Gemini rewrote: the list and the big second-screen line take its new Arabic. */
 function betterLine(item) {
   for (const li of $$("#feed li")) {
@@ -1574,3 +1604,4 @@ const booted = boot().catch(e => {
   $("#alert").hidden = false;
   $("#alert").textContent = e.message;
 });
+booted.then(() => setTimeout(checkUpdate, 2500));  // after the page is up: it never holds the start

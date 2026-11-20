@@ -3,8 +3,12 @@
 # the TV and phone apps. The finished installer is installed silently and asked to test
 # itself before it is published as a pre-release.
 #
+# Beside the installer it publishes the small update (Tarjim-Update-<version>.zip with
+# update.json): the files that change between versions, which the installed program fetches
+# and puts in place by itself (laptop/tarjim/update.py).
+#
 # It runs when started by hand (Actions > Build installer > Run workflow), and when this
-# file or the installer's version (laptop/launcher/build_setup.py) changes on a work branch.
+# file or the version (laptop/tarjim/__init__.py) changes on a work branch.
 name: Build installer
 
 on:
@@ -13,7 +17,7 @@ on:
     branches: ["claude/**"]
     paths:
       - ".github/workflows/build-installer.yml"
-      - "laptop/launcher/build_setup.py"
+      - "laptop/tarjim/__init__.py"   # the version: a new one is a new build
 
 permissions:
   contents: write  # to publish the pre-release
@@ -99,6 +103,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "building Tarjim.exe failed" }
           uv run --no-sync python launcher/build_setup.py
           if ($LASTEXITCODE -ne 0) { throw "building the installer failed" }
+          uv run --no-sync python launcher/build_update.py
+          if ($LASTEXITCODE -ne 0) { throw "building the small update failed" }
 
       - name: Install it and let it test itself
         run: |
@@ -122,10 +128,38 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the installed program could not translate" }
           Pop-Location
 
+      # The small update, tried on that installation both ways a user can get it: extracted
+      # over the folder by hand, and put in place by the program's own updater. After each,
+      # the installed program must still pass its own test.
+      - name: Try the small update on that installation
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP "TarjimTest"
+          $zip = (Get-ChildItem dist\Tarjim-Update-*.zip)[0].FullName
+          $manifest = Get-Content dist\update.json -Raw | ConvertFrom-Json
+          function Test-Installed($label) {
+            $report = Join-Path $env:RUNNER_TEMP "selftest-$label.json"
+            $p = Start-Process -FilePath (Join-Path $folder "Tarjim.exe") -ArgumentList "--selftest", $report -Wait -PassThru
+            $facts = Get-Content $report -Raw | ConvertFrom-Json
+            if ($p.ExitCode -ne 0 -or -not $facts.ok -or -not $facts.model) { Get-Content $report; throw "after the update ($label) the program failed its own test" }
+            "ok after the update ($label)"
+          }
+          Expand-Archive $zip -DestinationPath $folder -Force
+          Test-Installed "by hand"
+          $py = Join-Path $folder "python\python.exe"
+          Push-Location (Join-Path $folder "laptop")
+          $env:PYTHONPATH = (Join-Path $folder "laptop") + ";" + (Join-Path $folder "laptop\.venv\Lib\site-packages")
+          $env:TARJIM_ZIP = $zip
+          $env:TARJIM_SHA = $manifest.sha256
+          & $py -c "import os; from pathlib import Path; from tarjim import update, paths; print(update.installed_runtime(), update.apply_zip(Path(os.environ['TARJIM_ZIP']), paths.REPO, sha256=os.environ['TARJIM_SHA']))"
+          if ($LASTEXITCODE -ne 0) { throw "the program's own updater failed" }
+          Pop-Location
+          if (Test-Path (Join-Path $folder ".update")) { throw "the updater left its working folder behind" }
+          Test-Installed "by the program"
+
       - name: Collect the files
         id: files
         run: |
-          $version = (Select-String -Path laptop\launcher\build_setup.py -Pattern '^VERSION = "(.+)"').Matches[0].Groups[1].Value
+          $version = (Select-String -Path laptop\tarjim\__init__.py -Pattern '^__version__ = "(.+)"').Matches[0].Groups[1].Value
           Copy-Item tv-app\app\build\outputs\apk\debug\app-debug.apk "dist\Tarjim-TV-$version.apk"
           Copy-Item phone-app\app\build\outputs\apk\debug\app-debug.apk "dist\Tarjim-Phone-Remote-$version.apk"
           Remove-Item dist\setup-stub.exe -ErrorAction SilentlyContinue
@@ -148,6 +182,7 @@ jobs:
           prerelease: true
           body: |
             Built automatically from `${{ github.ref_name }}` at ${{ github.sha }}.
-            The installer was installed silently on the build machine and passed its own test there;
-            it has not been tried with a TV or a console.
+            The installer was installed silently on the build machine and passed its own test there,
+            also after the small update was applied to it; it has not been tried with a TV or a console.
+            An installed Tarjim (0.5.2 or later) fetches `Tarjim-Update-*.zip` by itself.
           files: dist/*

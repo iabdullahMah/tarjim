@@ -19,6 +19,7 @@ the code finds its files unchanged:
 
 from __future__ import annotations
 
+import json
 import struct
 import subprocess
 import sys
@@ -30,7 +31,10 @@ HERE = Path(__file__).resolve().parent
 LAPTOP = HERE.parent
 REPO = LAPTOP.parent
 DIST = REPO / "dist"
-VERSION = "0.5.1"
+sys.path.insert(0, str(HERE))
+from build_update import runtime_id, version  # noqa: E402
+
+VERSION = version()  # written once, in tarjim/__init__.py
 MAGIC = b"TARJIMZ1"
 
 SKIP_DIRS = {"__pycache__", "_pytest", "pytest", "test", "tests", "idlelib", "tkinter", "turtledemo", "ensurepip",
@@ -108,6 +112,12 @@ def payload():
             raise RuntimeError(f"{apk} is missing: build the {app} first")
         yield apk, f"{app}/app/build/outputs/apk/debug/app-debug.apk"
     yield REPO / "docs" / "LICENSES.md", "docs/LICENSES.md"
+    # Which Python libraries this installation has: a small update is only applied to an
+    # installation whose libraries it was made for (tarjim/update.py).
+    DIST.mkdir(exist_ok=True)
+    note = DIST / "runtime.json"
+    note.write_text(json.dumps({"runtime": runtime_id(), "installer": VERSION}), encoding="utf-8")
+    yield note, "runtime.json"
 
 
 def compile_stub(target: Path) -> None:
@@ -147,6 +157,7 @@ def build(fast: bool = False) -> Path:
                 fh.write(chunk)
         fh.write(MAGIC + struct.pack("<q", size))
     archive.unlink()
+    (DIST / "runtime.json").unlink(missing_ok=True)
     print(f"{out}  {out.stat().st_size / 1e6:.0f} MB  ({count} files, {raw / 1e6:.0f} MB unpacked, {time.time() - t0:.0f} s)")
     return out
 

@@ -41,7 +41,8 @@ _remote_lock = threading.Lock()
 # What a paired phone may not do: these need the laptop itself (a browser, the TV setup, the app's life).
 LOCAL_ONLY = ("/api/quit", "/api/focus", "/api/ps5/", "/api/tv/setup", "/api/tv/revert", "/api/tv/test",
               "/api/phone", "/api/guide-seen", "/api/xbox", "/api/console", "/v5/", "/v6/",
-              "/api/gemini")  # the key is typed on the laptop only
+              "/api/gemini",  # the key is typed on the laptop only
+              "/api/update")
 
 _xbox_auth = None
 
@@ -154,6 +155,38 @@ def _xbox_checks(cfg: dict, tv_ip, tv_reach: bool, tv_app: bool, models: bool) -
         "ps5_host": None, "ps5_name": chosen.get("name"), "ps5_user": "xbox" if linked and chosen.get("id") else None,
         "setup_done": bool(tv_ip and linked and chosen.get("id")),
     }
+
+
+_update_seen: dict = {"at": 0.0, "info": None}
+
+
+def update_view(fresh: bool = False) -> dict:
+    """Is there a newer version? Asked of GitHub at most every ten minutes."""
+    from .. import update
+
+    now = time.monotonic()
+    if fresh or _update_seen["info"] is None or now - _update_seen["at"] > 600:
+        try:
+            _update_seen["info"] = update.check()
+        except update.UpdateError as exc:
+            _update_seen["info"] = {"current": update.__version__, "available": False, "error": str(exc)}
+        _update_seen["at"] = now
+    info = _update_seen["info"]
+    return {k: info.get(k) for k in ("current", "latest", "available", "needs_installer", "size", "page", "error")}
+
+
+def update_apply() -> dict:
+    from .. import update
+
+    if live.state != "idle":
+        return {"ok": False, "error": "وقّف الترجمة أول، ثم حدّث."}
+    update_view()
+    try:
+        version = update.apply(_update_seen["info"] or {})
+    except update.UpdateError as exc:
+        return {"ok": False, "error": str(exc)}
+    _update_seen["info"] = None
+    return {"ok": True, "version": version}
 
 
 def gemini_view() -> dict:
@@ -608,6 +641,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(checks())
             if url.path == "/api/gemini":
                 return self._json(gemini_view())
+            if url.path == "/api/update":
+                return self._json(update_view(fresh=q.get("fresh") == "1"))
             if url.path == "/api/profile":
                 return self._json(profile_view(q.get("name", "default")))
             if url.path == "/api/packs":
@@ -778,6 +813,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(gemini_save(body))
             if path == "/api/gemini/test":
                 return self._json(gemini_test(body))
+            if path == "/api/update/apply":
+                return self._json(update_apply())
             if path == "/api/profile/new":
                 from ..translate import save_profile
 
