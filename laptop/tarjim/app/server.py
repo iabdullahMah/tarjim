@@ -255,7 +255,40 @@ def gemini_view() -> dict:
         "has_key": bool(g["key"]), "tail": g["key"][-4:] if len(g["key"]) >= 12 else "",
         "enabled": g["enabled"], "model": g["model"], "default_model": gemini.DEFAULT_MODEL,
         "stored": stored, "status": refiner.status() if refiner is not None else None,
+        # more keys: never the key itself, only what tells one from another
+        "extra": [{"id": i["id"], "name": i["name"], "model": i["model"], "tail": i["key"][-4:]}
+                  for i in gemini.extra_keys()],
+        "presets": {k: {"name": v["name"], "model": v["model"], "needs_base": v["kind"] == "openai" and not v["base"]}
+                    for k, v in gemini.PRESETS.items()},
     }
+
+
+def gemini_extra_add(body: dict) -> dict:
+    """One more key: tried with a small line first, saved only when it answers in Arabic."""
+    from .. import gemini
+
+    name = "الخدمة"
+    try:
+        item = gemini.make_extra(str(body.get("preset", "")), str(body.get("key", "")), str(body.get("model", "")),
+                                 str(body.get("base", "")), str(body.get("name", "")))
+        name = item["name"]
+        provider = gemini.Provider(item["kind"], item["key"], item["model"], item["base"], name=name)
+        sample = gemini.check_provider(provider)
+        gemini.add_extra(item)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except gemini.GeminiError as exc:
+        return {"ok": False, "error": gemini.friendly(exc, name)}
+    live.apply_gemini()
+    return {"ok": True, "sample": sample, **gemini_view()}
+
+
+def gemini_extra_remove(body: dict) -> dict:
+    from .. import gemini
+
+    gemini.remove_extra(str(body.get("id", "")))
+    live.apply_gemini()
+    return gemini_view()
 
 
 def gemini_save(body: dict) -> dict:
@@ -863,6 +896,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(gemini_save(body))
             if path == "/api/gemini/test":
                 return self._json(gemini_test(body))
+            if path == "/api/gemini/extra":
+                return self._json(gemini_extra_add(body))
+            if path == "/api/gemini/extra/remove":
+                return self._json(gemini_extra_remove(body))
             if path == "/api/update/apply":
                 return self._json(update_apply())
             if path == "/api/profile/new":

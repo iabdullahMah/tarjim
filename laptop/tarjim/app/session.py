@@ -213,8 +213,11 @@ class LiveSession:
         if old is not None:
             old.close()
         g = gemini.settings()
-        if not (g["key"] and g["enabled"]):
-            pipe.log_record({"kind": "gemini", "state": "off", "why": "no key" if not g["key"] else "switched off"})
+        more = [gemini.Provider(i["kind"], i["key"], i["model"], i["base"], name=i["name"], id=i["id"])
+                for i in gemini.extra_keys()]
+        if not ((g["key"] or more) and g["enabled"]):
+            pipe.log_record({"kind": "gemini", "state": "off",
+                             "why": "no key" if not (g["key"] or more) else "switched off"})
             return
 
         def on_better(en: str, ar: str) -> None:
@@ -226,12 +229,13 @@ class LiveSession:
         refiner = gemini.Refiner(Cache(), profile, key=g["key"], model=g["model"],
                                  title=str(prof.get("title") or ""), dialect=pipe.translator.dialect,
                                  glossary=dict(pipe.translator.glossary), female=set(pipe.translator.female),
-                                 base=gemini.API)
+                                 base=gemini.API, extra=more)
         refiner.on_better = pipe.better_arrived
         refiner.log = pipe.log_record  # every change of its state goes into the session log
         pipe.on_better = on_better
         pipe.refiner = self.refiner = refiner
-        pipe.log_record({"kind": "gemini", "state": "on", "model": g["model"], "dialect": refiner.dialect})
+        pipe.log_record({"kind": "gemini", "state": "on", "dialect": refiner.dialect,
+                         "keys": [f"{p.name}:{p.model}" for p in refiner.providers]})
 
     def apply_gemini(self) -> bool:
         """The key or the switch changed while translating: it takes effect at once."""

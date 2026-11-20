@@ -599,14 +599,54 @@ function showGemini(g) {
   $("#gemini-key").placeholder = g.has_key ? `محفوظ (آخره ${g.tail || "…"})` : "AIza...";
   $("#gemini-note").textContent = g.stored ? `محفوظ من Gemini: ${g.stored} سطر.` : "";
   const st = g.status;
-  $("#gemini-state").textContent = !g.has_key ? "ما فيه مفتاح" : !g.enabled ? "مطفي"
+  const any = g.has_key || (g.extra || []).length > 0;
+  $("#gemini-on").disabled = !any;
+  $("#gemini-state").textContent = !any ? "ما فيه مفتاح" : !g.enabled ? "مطفي"
     : st ? `${GEMINI_STATE[st.state] || ""}${st.done ? ` · ${st.done} سطر` : ""}` : "جاهز";
+  // the other keys, each with its own state while translating
+  const live = Object.fromEntries(((st && st.providers) || []).map(p => [p.id, p]));
+  $("#extra-list").replaceChildren(...(g.extra || []).map(x => {
+    const row = el("div", "row extra-row");
+    const p = live[x.id];
+    const state = p ? ` · ${GEMINI_STATE[p.state] || ""}${p.done ? ` · ${p.done} سطر` : ""}` : "";
+    row.append(el("b", "", x.name), el("span", "muted", `${x.model} · آخره ${x.tail}${state}`));
+    const del = el("button", "textbtn", "احذف");
+    del.onclick = async () => {
+      try { showGemini(await api("/api/gemini/extra/remove", { id: x.id })); } catch (e) { toast(e.message); }
+    };
+    row.append(del);
+    return row;
+  }));
+}
+function wireExtraKeys() {
+  const preset = $("#extra-preset"), model = $("#extra-model"), base = $("#extra-base");
+  const sync = () => {
+    const p = (S.gemini.presets || {})[preset.value] || {};
+    model.value = p.model || "";
+    base.hidden = !p.needs_base;
+  };
+  preset.onchange = sync;
+  sync();
+  $("#extra-add").onclick = async () => {
+    const btn = $("#extra-add");
+    btn.disabled = true;
+    try {
+      const r = await api("/api/gemini/extra", {
+        preset: preset.value, key: $("#extra-key").value.trim(), model: model.value.trim(), base: base.value.trim(),
+      });
+      if (!r.ok) return toast(r.error);
+      $("#extra-key").value = "";
+      showGemini(r);
+      toast(`انضاف المفتاح ✓ «${r.sample}»`);
+    } catch (e) { toast(e.message); } finally { btn.disabled = false; }
+  };
 }
 async function loadGemini() {
   if (S.remote || S.app) return;  // the key is typed on the laptop only
   let g;
   try { g = await api("/api/gemini"); } catch { return; }
   showGemini(g);
+  wireExtraKeys();
   $$("#dialect button").forEach(b => {
     b.classList.toggle("on", b.dataset.v === S.profile.dialect);
     b.onclick = () => {

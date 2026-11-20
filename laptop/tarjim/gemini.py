@@ -13,12 +13,18 @@ quota, a refused key, an answer that makes no sense) only means the local Arabic
 free key has a small quota per minute and per day, so requests are spaced out, several
 waiting lines go in one request, and after a refusal the thread waits before trying again.
 
+More keys can be added beside the first (another service such as Grok, through the request
+shape most services accept). Each key has its own thread, its own pace and its own state, and
+they share the waiting lines: with two keys twice as many lines are rewritten while still on
+the TV, and when one is refused the other carries on.
+
 The key is the user's secret: it is read from the private config file, sent only to Google
 in a request header, and never logged or given to the interface.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -121,6 +127,79 @@ def save_settings(key: str | None = None, enabled: bool | None = None, model: st
     return settings()
 
 
+# -- more keys: other services beside the first Gemini key --------------------------------------
+
+MAX_EXTRA = 4
+# What the page offers. "openai" is the request shape most other services accept
+# (POST <base>/chat/completions with a Bearer key).
+PRESETS = {
+    "grok": {"kind": "openai", "name": "Grok", "base": "https://api.x.ai/v1", "model": "grok-4.3"},
+    "gemini": {"kind": "gemini", "name": "Gemini 2", "base": "", "model": DEFAULT_MODEL},
+    "other": {"kind": "openai", "name": "", "base": "", "model": ""},
+}
+
+
+def _clean_model(model: str, default: str = "") -> str:
+    return "".join(ch for ch in str(model).strip() if ch.isalnum() or ch in "-._:/")[:80] or default
+
+
+def _clean_base(base: str) -> str:
+    """An address requests may be sent to: https only (plain http for this computer, for tests)."""
+    base = str(base).strip().rstrip("/")[:200]
+    if base.startswith("https://") or base.startswith("http://127.0.0.1"):
+        return base
+    raise ValueError("عنوان الخدمة لازم يبدأ بـ https://")
+
+
+def extra_keys() -> list[dict]:
+    """The other keys the user added: [{"id", "kind", "name", "key", "model", "base"}]."""
+    raw = paths.load_config().get("gemini")
+    items = raw.get("extra") if isinstance(raw, dict) else None
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and item.get("key") and item.get("kind") in ("gemini", "openai"):
+            out.append({k: str(item.get(k) or "") for k in ("id", "kind", "name", "key", "model", "base")})
+    return out[:MAX_EXTRA]
+
+
+def make_extra(preset: str, key: str, model: str = "", base: str = "", name: str = "") -> dict:
+    """One more key as it will be stored, from what the page sent. Raises ValueError (Arabic)."""
+    p = PRESETS.get(preset)
+    if p is None:
+        raise ValueError("نوع الخدمة مو معروف.")
+    key = str(key).strip()[:300]
+    if len(key) < 8:
+        raise ValueError("الصق المفتاح أول.")
+    item = {
+        "id": hashlib.sha256(f"{time.time()}{key}".encode()).hexdigest()[:8], "kind": p["kind"], "key": key,
+        "name": ("".join(ch for ch in str(name) if ch.isprintable())[:24].strip() or p["name"] or "خدمة ثانية"),
+        "model": _clean_model(model, p["model"]),
+        "base": _clean_base(base or p["base"]) if p["kind"] == "openai" else "",
+    }
+    if not item["model"]:
+        raise ValueError("اكتب اسم الموديل.")
+    return item
+
+
+def add_extra(item: dict) -> None:
+    cfg = paths.load_config()
+    raw = cfg.get("gemini") if isinstance(cfg.get("gemini"), dict) else {}
+    items = [i for i in extra_keys() if i["key"] != item["key"]]
+    if len(items) >= MAX_EXTRA:
+        raise ValueError(f"أقصى عدد للمفاتيح الإضافية {MAX_EXTRA}. احذف واحد أول.")
+    raw["extra"] = items + [item]
+    cfg["gemini"] = raw
+    paths.save_config(cfg)
+
+
+def remove_extra(item_id: str) -> None:
+    cfg = paths.load_config()
+    raw = cfg.get("gemini") if isinstance(cfg.get("gemini"), dict) else {}
+    raw["extra"] = [i for i in extra_keys() if i["id"] != item_id]
+    cfg["gemini"] = raw
+    paths.save_config(cfg)
+
+
 def dialect_of(profile: str, prof: dict) -> str:
     """The Arabic a game's lines are written in: the profile's own choice, else street talk for
     GTA VI (its speech is street talk) and Standard Arabic for every other game."""
@@ -132,24 +211,24 @@ def dialect_of(profile: str, prof: dict) -> str:
     return "saudi" if gta6.is_gta6(profile, str(prof.get("title") or "")) else "msa"
 
 
-def friendly(exc: Exception) -> str:
+def friendly(exc: Exception, name: str = "Gemini") -> str:
     """One plain Arabic sentence for the interface."""
     kind = getattr(exc, "kind", "")
     if kind == "key":
-        return "Google رفض المفتاح. تأكد إنك نسخته كامل من AI Studio، وإن اسم الموديل صحيح."
+        return f"{name} رفض المفتاح. تأكد إنك نسخته كامل، وإن اسم الموديل صحيح."
     if kind == "quota":
-        return "خلص الحد المجاني لهذا المفتاح حالياً. الترجمة تكمل بالمترجم المحلي ويرجع Gemini لحاله بعدين."
+        return f"خلص حد مفتاح {name} حالياً. الترجمة تكمل بالباقي ويرجع لحاله بعدين."
     if kind == "net":
-        return "ما قدرت أوصل لـGoogle. تأكد من الإنترنت."
-    return "Gemini رد بشي ما ينفع. جرّب مرة ثانية."
+        return f"ما قدرت أوصل لـ{name}. تأكد من الإنترنت."
+    return f"{name} رد بشي ما ينفع. جرّب مرة ثانية."
 
 
 # -- one request ----------------------------------------------------------------------------
 
 
-def build_request(lines: list[dict], *, title: str, dialect: str, names: list[tuple[str, str, bool]],
-                  earlier: list[dict]) -> dict:
-    """The request body for some lines ({"en", "speaker"}) of one game."""
+def build_prompt(lines: list[dict], *, title: str, dialect: str, names: list[tuple[str, str, bool]],
+                 earlier: list[dict]) -> tuple[str, str]:
+    """(the standing instructions, this request's text) for some lines ({"en", "speaker"})."""
     parts = []
     if title:
         parts.append(f"Game: {title}")
@@ -158,9 +237,16 @@ def build_request(lines: list[dict], *, title: str, dialect: str, names: list[tu
     if earlier:
         parts.append("Earlier lines (for understanding only):\n" + "\n".join(_said(l) for l in earlier))
     parts.append("Translate:\n" + "\n".join(f"{i}. {_said(l)}" for i, l in enumerate(lines, 1)))
+    return _RULES.format(style=_STYLE.get(dialect, _STYLE["msa"])), "\n\n".join(parts)
+
+
+def build_request(lines: list[dict], *, title: str, dialect: str, names: list[tuple[str, str, bool]],
+                  earlier: list[dict]) -> dict:
+    """Gemini's request body for some lines of one game."""
+    rules, text = build_prompt(lines, title=title, dialect=dialect, names=names, earlier=earlier)
     return {
-        "systemInstruction": {"parts": [{"text": _RULES.format(style=_STYLE.get(dialect, _STYLE["msa"]))}]},
-        "contents": [{"role": "user", "parts": [{"text": "\n\n".join(parts)}]}],
+        "systemInstruction": {"parts": [{"text": rules}]},
+        "contents": [{"role": "user", "parts": [{"text": text}]}],
         "generationConfig": {
             "temperature": 0.3,
             "responseMimeType": "application/json",
@@ -174,15 +260,12 @@ def _said(line: dict) -> str:
     return f"[{line['speaker']}] {line['en']}" if line.get("speaker") else line["en"]
 
 
-def call(key: str, model: str, body: dict, *, base: str = API, timeout: float = TIMEOUT_S) -> list[str]:
-    """Send one request; the strings of the JSON array it answers with."""
-    req = urllib.request.Request(
-        f"{base}/models/{model}:generateContent", data=json.dumps(body).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json", "x-goog-api-key": key},
-    )
+def _post(url: str, headers: dict, body: dict, timeout: float) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
+                                 headers={"Content-Type": "application/json", "User-Agent": "Tarjim", **headers})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
-            data = json.loads(res.read().decode("utf-8"))
+            return json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
             raise GeminiError("quota", "HTTP 429") from None
@@ -191,22 +274,93 @@ def call(key: str, model: str, body: dict, *, base: str = API, timeout: float = 
         raise GeminiError("net", f"HTTP {exc.code}") from None
     except (OSError, ValueError) as exc:  # no connection, a timeout, or an answer that is not JSON
         raise GeminiError("net", type(exc).__name__) from None
+
+
+def _strings(text) -> list[str]:
+    """The list of strings in an answer: a JSON array, or one inside a fenced block or an
+    object (services without a strict output shape wrap it their own way)."""
+    if not isinstance(text, str):
+        raise GeminiError("bad", "no usable answer")
     try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
         out = json.loads(text)
-    except (KeyError, IndexError, TypeError, ValueError):
-        raise GeminiError("bad", "no usable answer") from None  # refused by its filter, or cut off
+    except ValueError:
+        a, b = text.find("["), text.rfind("]")
+        if a < 0 or b <= a:
+            raise GeminiError("bad", "no list in the answer") from None
+        try:
+            out = json.loads(text[a:b + 1])
+        except ValueError:
+            raise GeminiError("bad", "no list in the answer") from None
+    if isinstance(out, dict):
+        out = next((v for v in out.values() if isinstance(v, list)), None)
     if not isinstance(out, list) or not all(isinstance(x, str) for x in out):
         raise GeminiError("bad", "not a list of strings")
     return out
 
 
+def call(key: str, model: str, body: dict, *, base: str = API, timeout: float = TIMEOUT_S) -> list[str]:
+    """Send one request to Gemini; the strings of the JSON array it answers with."""
+    data = _post(f"{base}/models/{model}:generateContent", {"x-goog-api-key": key}, body, timeout)
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        raise GeminiError("bad", "no usable answer") from None  # refused by its filter, or cut off
+    return _strings(text)
+
+
+def call_openai(key: str, model: str, base: str, rules: str, text: str, *, timeout: float = TIMEOUT_S) -> list[str]:
+    """The same request in the shape most other services accept (chat completions)."""
+    body = {"model": model, "temperature": 0.3,
+            "messages": [{"role": "system", "content": rules}, {"role": "user", "content": text}]}
+    data = _post(f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}, body, timeout)
+    try:
+        answer = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise GeminiError("bad", "no usable answer") from None
+    return _strings(answer)
+
+
+class Provider:
+    """One key of one service, with its own pace and state."""
+
+    def __init__(self, kind: str, key: str, model: str, base: str = "", name: str = "", id: str = "",
+                 gap_s: float = GAP_S) -> None:
+        self.kind, self.key, self.model = kind, key, model
+        self.base = base or API
+        self.name = name or ("Gemini" if kind == "gemini" else "خدمة ثانية")
+        self.id = id
+        self.gap_s = gap_s  # the gap now; it moves between min_gap_s and GAP_MAX_S
+        self.min_gap_s = gap_s
+        self.state = "ok"  # ok | waiting (refused for now) | bad_key
+        self.error = ""
+        self.done = 0
+        self.requests = 0
+        self.answered = 0  # requests answered in a row
+        self.refusals = 0
+        self.not_before = 0.0
+
+    def ask(self, lines: list[dict], **about) -> list[str]:
+        if self.kind == "gemini":
+            return call(self.key, self.model, build_request(lines, **about), base=self.base)
+        rules, text = build_prompt(lines, **about)
+        return call_openai(self.key, self.model, self.base, rules, text)
+
+    def view(self) -> dict:
+        return {"id": self.id, "name": self.name, "state": self.state, "done": self.done,
+                "gap_s": round(self.gap_s, 1), "error": self.error}
+
+
 def check(key: str, model: str, *, base: str = API) -> str:
-    """Try the key with one small line; its Arabic. Raises GeminiError."""
-    body = build_request([{"en": "Wait here, I'll be right back."}], title="", dialect="msa", names=[], earlier=[])
-    out = call(key, model, body, base=base)
+    """Try a Gemini key with one small line; its Arabic. Raises GeminiError."""
+    return check_provider(Provider("gemini", key, model, base))
+
+
+def check_provider(provider: Provider) -> str:
+    """Try any key with one small line; its Arabic. Raises GeminiError."""
+    en = "Wait here, I'll be right back."
+    out = provider.ask([{"en": en}], title="", dialect="msa", names=[], earlier=[])
     ar = normalize_arabic(out[0]) if out else ""
-    if not _usable("Wait here, I'll be right back.", ar):
+    if not _usable(en, ar):
         raise GeminiError("bad", "not Arabic")
     return ar
 
@@ -217,44 +371,60 @@ def _usable(en: str, ar: str) -> bool:
     return letters >= 2 and letters >= 0.5 * sum(1 for ch in ar if ch.isalpha()) and len(ar) <= 4 * len(en) + 40
 
 
-# -- the thread -----------------------------------------------------------------------------
+# -- the threads ----------------------------------------------------------------------------
 
 
 class Refiner:
-    """Sends shown lines to Gemini in the background and stores what comes back."""
+    """Sends shown lines to the stronger translators in the background and stores what comes
+    back. `key` is the first Gemini key (may be empty); `extra` holds more Providers."""
 
-    def __init__(self, cache: Cache, profile: str, *, key: str, model: str = DEFAULT_MODEL, title: str = "",
+    def __init__(self, cache: Cache, profile: str, *, key: str = "", model: str = DEFAULT_MODEL, title: str = "",
                  dialect: str = "msa", glossary: dict[str, str] | None = None, female: set[str] | None = None,
-                 base: str = API, gap_s: float = GAP_S, pauses_s: tuple[float, ...] = PAUSES_S) -> None:
+                 base: str = API, gap_s: float = GAP_S, pauses_s: tuple[float, ...] = PAUSES_S,
+                 extra: list[Provider] | None = None) -> None:
         self.cache = cache
         self.profile = profile
-        self.key = key
-        self.model = model
         self.title = title
         self.dialect = dialect if dialect in DIALECTS else "msa"
         self.glossary = dict(glossary or {})
         self.female = set(female or ())
-        self.base = base
-        self.gap_s = gap_s  # the gap now; it moves between min_gap_s and GAP_MAX_S
-        self.min_gap_s = gap_s
-        self._answered = 0  # requests answered in a row
         self.pauses_s = pauses_s
+        self.providers: list[Provider] = ([Provider("gemini", key, model, base, gap_s=gap_s)] if key else []) + list(extra or [])
         self.on_better = None  # callback(english, arabic) when a line's better Arabic arrives
-        self.log = None  # callback(record) for the session log: each change of state, never the key
-        self.state = "ok"  # ok | waiting (refused for now) | bad_key
-        self.error = ""
-        self.done = 0  # lines stored
-        self.requests = 0
+        self.log = None  # callback(record) for the session log: each change of state, never a key
         self.failed = 0  # lines given up on
         self._lock = threading.Condition()
         self._todo: deque[dict] = deque(maxlen=BACKLOG)
         self._known: set[str] = set()  # loose keys of lines waiting or already asked about
         self._recent: deque[dict] = deque(maxlen=CONTEXT)
-        self._refusals = 0
-        self._not_before = 0.0
         self._closed = False
-        self._thread = threading.Thread(target=self._run, name="tarjim-gemini", daemon=True)
-        self._thread.start()
+        self._threads = [threading.Thread(target=self._run, args=(p,), name=f"tarjim-refine-{i}", daemon=True)
+                         for i, p in enumerate(self.providers)]
+        for t in self._threads:
+            t.start()
+
+    # The first key's pace, as before more keys existed (the tests and the log read it).
+    @property
+    def gap_s(self) -> float:
+        return self.providers[0].gap_s if self.providers else 0.0
+
+    @gap_s.setter
+    def gap_s(self, value: float) -> None:
+        for p in self.providers:
+            p.gap_s = value
+
+    @property
+    def min_gap_s(self) -> float:
+        return self.providers[0].min_gap_s if self.providers else 0.0
+
+    @property
+    def done(self) -> int:
+        return sum(p.done for p in self.providers)
+
+    @property
+    def state(self) -> str:
+        states = [p.state for p in self.providers]
+        return "ok" if "ok" in states else "waiting" if "waiting" in states else "bad_key"
 
     # -- from the pipeline ------------------------------------------------------------------
 
@@ -277,28 +447,32 @@ class Refiner:
 
     def status(self) -> dict:
         with self._lock:
-            return {"state": self.state, "done": self.done, "waiting": len(self._todo), "error": self.error,
-                    "gap_s": round(self.gap_s, 1)}
+            state = self.state
+            error = "" if state == "ok" else next((p.error for p in self.providers if p.error), "")
+            return {"state": state, "done": self.done, "waiting": len(self._todo), "error": error,
+                    "gap_s": round(self.gap_s, 1), "providers": [p.view() for p in self.providers]}
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
             self._lock.notify_all()
-        self._thread.join(timeout=1.0)
+        for t in self._threads:
+            t.join(timeout=1.0)
 
-    # -- the worker -------------------------------------------------------------------------
+    # -- the workers: one per key, sharing the waiting lines ---------------------------------
 
-    def _take(self) -> list[dict] | None:
-        """Wait for work and for the gap since the last request; the newest lines, oldest first
-        (the newest is the one on the TV now). None when closing."""
+    def _take(self, p: Provider) -> list[dict] | None:
+        """Wait for work and for this key's gap; the newest lines, oldest first (the newest is
+        the one on the TV now). None when closing."""
         with self._lock:
             while not self._closed:
-                wait = self._not_before - time.monotonic()
-                if self._todo and wait <= 0 and self.state != "bad_key":
+                wait = p.not_before - time.monotonic()
+                if self._todo and wait <= 0 and p.state != "bad_key":
                     batch = [self._todo.pop() for _ in range(min(BATCH, len(self._todo)))]
                     batch.reverse()
+                    p.not_before = time.monotonic() + p.gap_s  # the next request, whatever this one does
                     return batch
-                self._lock.wait(timeout=wait if self._todo and wait > 0 else None)
+                self._lock.wait(timeout=wait if self._todo and wait > 0 and p.state != "bad_key" else None)
         return None
 
     def _names(self, batch: list[dict]) -> list[tuple[str, str, bool]]:
@@ -307,43 +481,42 @@ class Refiner:
         text = " ".join(l["en"] for b in batch for l in [b, *b["earlier"]]).lower()
         return [(en, ar, en in self.female) for en, ar in self.glossary.items() if en and en.lower() in text][:40]
 
-    def _run(self) -> None:
+    def _run(self, p: Provider) -> None:
         while True:
-            batch = self._take()
+            batch = self._take(p)
             if batch is None:
                 return
-            body = build_request(batch, title=self.title, dialect=self.dialect, names=self._names(batch),
-                                 earlier=batch[0]["earlier"])
             try:
-                self.requests += 1
-                out = call(self.key, self.model, body, base=self.base)
+                p.requests += 1
+                out = p.ask(batch, title=self.title, dialect=self.dialect, names=self._names(batch),
+                            earlier=batch[0]["earlier"])
                 if len(out) != len(batch):
                     raise GeminiError("bad", f"{len(out)} answers for {len(batch)} lines")
             except GeminiError as exc:
-                self._failed(batch, exc)
+                self._failed(p, batch, exc)
                 continue
-            except Exception as exc:  # this thread must never die: the local Arabic simply stays
-                self._failed(batch, GeminiError("bad", type(exc).__name__))
+            except Exception as exc:  # a thread must never die: the local Arabic simply stays
+                self._failed(p, batch, GeminiError("bad", type(exc).__name__))
                 continue
             with self._lock:
-                was = self.state if self.requests > 1 else ""
-                self.state, self.error, self._refusals = "ok", "", 0
-                self._answered += 1
-                if self._answered % EASE_AFTER == 0 and self.gap_s > self.min_gap_s:
-                    self.gap_s = max(self.min_gap_s, self.gap_s * 0.8)
-                self._not_before = time.monotonic() + self.gap_s
+                was = p.state if p.requests > 1 else ""
+                p.state, p.error, p.refusals = "ok", "", 0
+                p.answered += 1
+                if p.answered % EASE_AFTER == 0 and p.gap_s > p.min_gap_s:
+                    p.gap_s = max(p.min_gap_s, p.gap_s * 0.8)
+                p.not_before = time.monotonic() + p.gap_s
             if was != "ok":
-                self._note({"state": "ok", "lines": len(batch)})  # the first answer, or back after a refusal
+                self._note(p, {"state": "ok", "lines": len(batch)})  # the first answer, or back after a refusal
             for line, raw in zip(batch, out):
                 ar = normalize_arabic(raw)
                 if not _usable(line["en"], ar):
                     self.failed += 1
                     continue
                 try:
-                    self.cache.put_better(self.profile, line["en"], self.dialect, ar, self.model)
+                    self.cache.put_better(self.profile, line["en"], self.dialect, ar, p.model)
                 except Exception:
                     continue  # the cache was closed under us: the session is ending
-                self.done += 1
+                p.done += 1
                 callback = self.on_better
                 if callback is not None:
                     try:
@@ -351,30 +524,31 @@ class Refiner:
                     except Exception:
                         pass  # drawing it now failed; it is stored for the next time all the same
 
-    def _note(self, rec: dict) -> None:
+    def _note(self, p: Provider, rec: dict) -> None:
         if self.log is not None:
             try:
-                self.log({"kind": "gemini", **rec})
+                self.log({"kind": "gemini", "provider": p.name, **rec})
             except Exception:
                 pass
 
-    def _failed(self, batch: list[dict], exc: GeminiError) -> None:
-        self._note({"state": "failed", "why": exc.kind, "detail": exc.detail, "lines": len(batch),
-                    "gap_s": round(self.gap_s, 1)})
+    def _failed(self, p: Provider, batch: list[dict], exc: GeminiError) -> None:
+        self._note(p, {"state": "failed", "why": exc.kind, "detail": exc.detail, "lines": len(batch),
+                       "gap_s": round(p.gap_s, 1)})
         with self._lock:
-            self.error = friendly(exc)
+            p.error = friendly(exc, p.name)
             if exc.kind == "bad":  # these lines will not do better a second time
                 self.failed += len(batch)
-                self._not_before = time.monotonic() + self.gap_s
+                p.not_before = time.monotonic() + p.gap_s
                 return
-            self._todo.extend(batch)  # asked again later
+            self._todo.extend(batch)  # asked again later, by this key or another
             if exc.kind == "key":
-                self.state = "bad_key"
-                return
-            if exc.kind == "quota":  # asked too often for this key: ask less often from now on
-                self._answered = 0
-                self.gap_s = min(GAP_MAX_S, max(self.gap_s * 2.0, self.min_gap_s, 1.0))
-            pause = self.pauses_s[min(self._refusals, len(self.pauses_s) - 1)] if self.pauses_s else self.gap_s
-            self._refusals += 1
-            self.state = "waiting"
-            self._not_before = time.monotonic() + pause
+                p.state = "bad_key"
+            else:
+                if exc.kind == "quota":  # asked too often for this key: ask less often from now on
+                    p.answered = 0
+                    p.gap_s = min(GAP_MAX_S, max(p.gap_s * 2.0, p.min_gap_s, 1.0))
+                pause = self.pauses_s[min(p.refusals, len(self.pauses_s) - 1)] if self.pauses_s else p.gap_s
+                p.refusals += 1
+                p.state = "waiting"
+                p.not_before = time.monotonic() + pause
+            self._lock.notify_all()  # another key may take these lines now

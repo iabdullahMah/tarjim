@@ -234,11 +234,29 @@
         <label class="switch"><input type="checkbox" id="gemini-on"><i></i>
           <span>استخدم Gemini <small>لو طفّيته، الترجمات المحفوظة منه تبقى تطلع. يشتغل على طول، حتى لو الترجمة شغّالة.</small></span></label>
         <div class="field">
+          <div class="field-head"><b>مفاتيح إضافية</b><span class="muted">اختياري</span></div>
+          <p class="muted">مفتاح من خدمة ثانية (مثل Grok) يشتغل مع Gemini: السطور تتوزّع بينهم فيتبدّل عدد أكبر وهي على الشاشة، ولو واحد وقف يكمل الثاني. اشتراك التطبيق ما يكفي، لازم «مفتاح API» من موقع المطوّرين حق الخدمة. مفتاحين من نفس الشركة لتجاوز حدّها المجاني ممكن يخالف شروطها.</p>
+          <div id="extra-list"></div>
+          <div class="row">
+            <select class="text" id="extra-preset" aria-label="الخدمة">
+              <option value="grok">Grok (xAI)</option>
+              <option value="gemini">Gemini</option>
+              <option value="other">خدمة ثانية</option>
+            </select>
+            <input class="text ltr wide" id="extra-key" type="password" autocomplete="off" spellcheck="false" maxlength="300" placeholder="المفتاح" aria-label="المفتاح الإضافي">
+          </div>
+          <div class="row">
+            <input class="text ltr" id="extra-model" maxlength="80" spellcheck="false" placeholder="الموديل" aria-label="موديل المفتاح الإضافي">
+            <input class="text ltr wide" id="extra-base" maxlength="200" spellcheck="false" placeholder="https://api.example.com/v1" aria-label="عنوان الخدمة" hidden>
+            <button class="btn soft" id="extra-add">جرّب وأضف</button>
+          </div>
+        </div>
+        <div class="field">
           <div class="field-head"><b>عربي هذي اللعبة</b><span class="muted">لكل لعبة اختيارها</span></div>
           <div class="seg" id="dialect"><button data-v="msa">فصحى بسيطة</button><button data-v="saudi">عامية سعودية</button></div>
         </div>
         <div class="field">
-          <div class="field-head"><b>الموديل</b><span class="muted">اتركه مثل ما هو إلا لو تعرف وش تسوي</span></div>
+          <div class="field-head"><b>موديل Gemini</b><span class="muted">اتركه مثل ما هو إلا لو تعرف وش تسوي</span></div>
           <input class="text ltr" id="gemini-model" maxlength="80" spellcheck="false" aria-label="اسم موديل Gemini">
         </div>
       </div>
