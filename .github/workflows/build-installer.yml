@@ -144,7 +144,7 @@ jobs:
             "ok after the update ($label)"
           }
           Expand-Archive $zip -DestinationPath $folder -Force
-          Test-Installed "by hand"
+          Test-Installed "hand"
           $py = Join-Path $folder "python\python.exe"
           Push-Location (Join-Path $folder "laptop")
           $env:PYTHONPATH = (Join-Path $folder "laptop") + ";" + (Join-Path $folder "laptop\.venv\Lib\site-packages")
@@ -154,7 +154,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the program's own updater failed" }
           Pop-Location
           if (Test-Path (Join-Path $folder ".update")) { throw "the updater left its working folder behind" }
-          Test-Installed "by the program"
+          Test-Installed "program"
 
       - name: Collect the files
         id: files
