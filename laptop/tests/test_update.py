@@ -221,3 +221,74 @@ def test_the_update_built_here_passes_its_own_rules(tmp_path, monkeypatch):
     assert update.apply_zip(archive, root, sha256=manifest["sha256"]) == update.__version__
     assert (root / "laptop" / "tarjim" / "update.py").exists() and (root / "packs" / "gta6.json").exists()
     assert not list((root / "laptop").rglob("__pycache__"))
+
+
+def test_the_download_reports_its_progress(hub, installed, monkeypatch):
+    h = hub("99.0.0")
+    monkeypatch.setattr(update, "installed_runtime", lambda root=None: update.LEGACY_RUNTIME)
+    seen = []
+    assert update.apply(update.check(), installed, progress=lambda done, total: seen.append((done, total))) == "99.0.0"
+    assert seen and seen[-1] == (h.manifest["size"], h.manifest["size"])
+    assert all(a[0] <= b[0] for a, b in zip(seen, seen[1:]))
+
+
+def test_the_app_updates_in_the_background_and_tells_the_page(hub, installed, monkeypatch):
+    """The page is told the share downloaded, then that it is done. Started from a console
+    (no Tarjim.exe to start again) the program stays open and says to reopen it by hand."""
+    import time
+
+    from tarjim import paths
+    from tarjim.app import server
+
+    hub("99.0.0")
+    monkeypatch.setattr(update, "installed_runtime", lambda root=None: update.LEGACY_RUNTIME)
+    monkeypatch.setattr(paths, "REPO", installed)
+    monkeypatch.delenv("TARJIM_HOST", raising=False)
+    monkeypatch.setattr(server, "_update_seen", {"at": 0.0, "info": None})
+    quit_calls = []
+    monkeypatch.setattr(server, "_quit_now", lambda: quit_calls.append(1))
+    q = server.hub.subscribe()
+    try:
+        assert server.update_view(fresh=True)["available"] is True
+        assert server.update_apply() == {"ok": True, "started": True}
+        events = []
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not (events and events[-1]["stage"] in ("done", "error")):
+            try:
+                kind, data = q.get(timeout=0.5)
+            except Exception:
+                continue
+            if kind == "update":
+                events.append(data)
+    finally:
+        server.hub.unsubscribe(q)
+    assert events[0] == {"stage": "download", "pct": 0}
+    assert events[-1] == {"stage": "done", "pct": 100, "version": "99.0.0", "restart": False}
+    assert [e["pct"] for e in events] == sorted(e["pct"] for e in events)
+    assert '"99.0.0"' in (installed / "laptop" / "tarjim" / "__init__.py").read_text(encoding="utf-8")
+    assert quit_calls == []  # nothing to start again with: it does not close itself
+    for _ in range(50):  # the worker lets go of its lock
+        if not server._update_busy.locked():
+            break
+        time.sleep(0.05)
+    assert not server._update_busy.locked()
+
+
+def test_the_program_restarts_itself_only_through_its_own_executable(tmp_path, monkeypatch):
+    from tarjim.app import server
+
+    monkeypatch.delenv("TARJIM_HOST", raising=False)
+    assert server._restart_command() is None
+    monkeypatch.setenv("TARJIM_HOST", str(tmp_path / "gone.exe"))
+    assert server._restart_command() is None
+    exe = tmp_path / "Tarjim.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setenv("TARJIM_HOST", str(exe))
+    assert server._restart_command() == [str(exe), "--wait"]
+
+
+def test_an_update_is_not_started_while_translating(monkeypatch):
+    from tarjim.app import server
+
+    monkeypatch.setattr(server.live, "state", "running")
+    assert server.update_apply()["ok"] is False

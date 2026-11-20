@@ -657,15 +657,35 @@ async function checkUpdate() {
   $("#update-text").textContent = `تحديث جديد: ${u.latest}${mb}`;
   go.onclick = async () => {
     go.disabled = true;
-    $("#update-text").textContent = "أنزّل التحديث…";
+    $("#update-later").hidden = true;
+    updateProgress({ stage: "download", pct: 0 });
     try {
       const r = await api("/api/update/apply", {});
-      if (!r.ok) { $("#update-text").textContent = r.error; go.disabled = false; return; }
-      $("#update-text").textContent = `تم التحديث إلى ${r.version}. اقفل ترجِم وافتحه من جديد.`;
-      go.hidden = true;
-      $("#update-later").textContent = "تمام";
-    } catch (e) { $("#update-text").textContent = e.message; go.disabled = false; }
+      if (!r.ok) updateProgress({ stage: "error", error: r.error });
+    } catch (e) { updateProgress({ stage: "error", error: e.message }); }
   };
+}
+/* The update as it goes: the share downloaded, then the program closing and opening again. */
+function updateProgress(u) {
+  const bar = $("#update-bar"), text = $("#update-text"), meter = $("#update-meter");
+  bar.hidden = false;
+  if (u.stage === "error") {
+    text.textContent = u.error;
+    meter.hidden = true;
+    $("#update-go").disabled = false;
+    $("#update-later").hidden = false;
+    return;
+  }
+  $("#update-go").hidden = true;
+  $("#update-later").hidden = true;
+  meter.hidden = false;
+  $("#update-fill").style.width = `${u.pct || 0}%`;
+  if (u.stage === "done") {
+    text.textContent = u.restart ? `تم التحديث إلى ${u.version}. يقفل ويفتح لحاله الحين…`
+      : `تم التحديث إلى ${u.version}. اقفل ترجِم وافتحه من جديد.`;
+  } else {
+    text.textContent = `أنزّل التحديث… ${u.pct || 0}٪`;
+  }
 }
 
 /* A line Gemini rewrote: the list and the big second-screen line take its new Arabic. */
@@ -1456,6 +1476,7 @@ function connect() {
     if (S.gemini && st.gemini) showGemini({ ...S.gemini, status: st.gemini });
   });
   es.addEventListener("better", e => betterLine(JSON.parse(e.data)));
+  es.addEventListener("update", e => updateProgress(JSON.parse(e.data)));
   // The Xbox picture is received by the program's own window: start and stop it with the session.
   es.addEventListener("xbox", e => {
     if (S.remote) return;

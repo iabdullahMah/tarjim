@@ -175,18 +175,67 @@ def update_view(fresh: bool = False) -> dict:
     return {k: info.get(k) for k in ("current", "latest", "available", "needs_installer", "size", "page", "error")}
 
 
-def update_apply() -> dict:
-    from .. import update
+_update_busy = threading.Lock()
 
+
+def update_apply() -> dict:
+    """Start the update in the background. Its progress goes to the page as "update" events:
+    {"stage": "download", "pct"}, then "install", then "done" (with `restart`: the program
+    closes and opens again by itself) or "error"."""
     if live.state != "idle":
         return {"ok": False, "error": "وقّف الترجمة أول، ثم حدّث."}
-    update_view()
+    if not _update_busy.acquire(blocking=False):
+        return {"ok": True, "started": False}  # already under way
+    threading.Thread(target=_update_work, name="tarjim-update", daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+def _update_work() -> None:
+    from .. import update
+
     try:
-        version = update.apply(_update_seen["info"] or {})
+        update_view()
+        last = [-1]
+
+        def progress(done: int, total: int) -> None:
+            pct = min(99, int(done * 100 / total)) if total else 0
+            if pct != last[0]:
+                last[0] = pct
+                hub.publish("update", {"stage": "download", "pct": pct})
+
+        hub.publish("update", {"stage": "download", "pct": 0})
+        version = update.apply(_update_seen["info"] or {}, progress=progress)
+        _update_seen["info"] = None
+        restart = _restart_command() is not None
+        hub.publish("update", {"stage": "done", "pct": 100, "version": version, "restart": restart})
+        if restart:
+            time.sleep(1.8)  # the page shows "restarting" for a moment
+            _restart()
     except update.UpdateError as exc:
-        return {"ok": False, "error": str(exc)}
-    _update_seen["info"] = None
-    return {"ok": True, "version": version}
+        hub.publish("update", {"stage": "error", "error": str(exc)})
+    except Exception as exc:
+        hub.publish("update", {"stage": "error", "error": friendly_error(exc)})
+    finally:
+        _update_busy.release()
+
+
+def _restart_command() -> list[str] | None:
+    """How to start the program again: its own executable (set by Tarjim.exe), told to wait
+    for this copy to be gone. None when started another way (a developer's console)."""
+    host = os.environ.get("TARJIM_HOST")
+    return [host, "--wait"] if host and Path(host).exists() else None
+
+
+def _restart() -> None:
+    cmd = _restart_command()
+    if cmd is None:
+        return
+    flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0  # detached, its own group
+    try:
+        subprocess.Popen(cmd, cwd=str(Path(cmd[0]).parent), creationflags=flags, close_fds=True)
+    except OSError:
+        return  # it could not be started: this copy stays open, the page says to reopen by hand
+    _quit_now()
 
 
 def gemini_view() -> dict:
@@ -1011,6 +1060,10 @@ def main(window: bool = True) -> int:
 
     say.setup_console()  # a Windows in another language gives streams that cannot hold Arabic
     os.environ.pop("__PYVENV_LAUNCHER__", None)  # set by Tarjim.exe for this process only
+    if "--wait" in sys.argv:  # started by the copy that just updated itself: let it close first
+        deadline = time.monotonic() + 25
+        while _port_open(HOST, PORT, 0.3) and time.monotonic() < deadline:
+            time.sleep(0.3)
     if _port_open(HOST, PORT, 0.4):  # already running: bring its window forward instead of a second copy
         if window:
             _ask_running_copy_to_show()

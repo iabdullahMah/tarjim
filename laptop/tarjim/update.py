@@ -208,8 +208,27 @@ def _place(stage: Path, root: Path) -> None:
             shutil.copyfile(src, root / name)
 
 
-def apply(info: dict, root: Path | None = None, timeout: float = 120.0) -> str:
-    """Download the update `check` found and put it in place; the new version."""
+def _download(url: str, dest: Path, timeout: float, limit: int, progress=None) -> None:
+    """Fetch a file in pieces, telling `progress(done_bytes, total_bytes)` as it comes."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Tarjim"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res, dest.open("wb") as fh:
+            total = int(res.headers.get("Content-Length") or 0)
+            done = 0
+            while chunk := res.read(256 * 1024):
+                done += len(chunk)
+                if done > limit:
+                    raise UpdateError("ملف التحديث أكبر من المتوقع، ما نزّلته.")
+                fh.write(chunk)
+                if progress is not None:
+                    progress(done, total)
+    except (OSError, ValueError) as exc:
+        raise UpdateError("انقطع تنزيل التحديث. تأكد من الإنترنت وجرّب مرة ثانية.") from exc
+
+
+def apply(info: dict, root: Path | None = None, timeout: float = 120.0, progress=None) -> str:
+    """Download the update `check` found and put it in place; the new version.
+    `progress(done_bytes, total_bytes)` is called while it downloads."""
     if not info.get("available"):
         raise UpdateError("ما فيه تحديث جديد.")
     if info.get("needs_installer"):
@@ -217,11 +236,12 @@ def apply(info: dict, root: Path | None = None, timeout: float = 120.0) -> str:
     url = str(info.get("url") or "")
     if not url.startswith(DOWNLOADS):
         raise UpdateError("عنوان التحديث مو من صفحة ترجِم، تجاهلته.")
-    data = _get(url, timeout, MAX_ZIP)
     fd, tmp = tempfile.mkstemp(prefix="tarjim-update-", suffix=".zip")
+    os.close(fd)
     try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
+        total = int(info.get("size") or 0)
+        _download(url, Path(tmp), timeout, MAX_ZIP,
+                  None if progress is None else (lambda done, size: progress(done, size or total)))
         sha = str(info.get("sha256") or "")
         if len(sha) != 64:
             raise UpdateError("وصف التحديث ناقص، ما ركّبته.")
