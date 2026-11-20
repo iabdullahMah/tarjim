@@ -108,17 +108,23 @@ def settings() -> dict:
     return {
         "key": str(raw.get("key") or "").strip(),
         "enabled": bool(raw.get("enabled", True)),
+        # hold a line back for the stronger translator's answer instead of showing the local
+        # Arabic first and changing it a second later
+        "wait": bool(raw.get("wait", True)),
         "model": str(raw.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL,
     }
 
 
-def save_settings(key: str | None = None, enabled: bool | None = None, model: str | None = None) -> dict:
+def save_settings(key: str | None = None, enabled: bool | None = None, model: str | None = None,
+                  wait: bool | None = None) -> dict:
     cfg = paths.load_config()
     raw = cfg.get("gemini") if isinstance(cfg.get("gemini"), dict) else {}
     if key is not None:
         raw["key"] = key.strip()[:200]
     if enabled is not None:
         raw["enabled"] = bool(enabled)
+    if wait is not None:
+        raw["wait"] = bool(wait)
     if model is not None:
         clean = "".join(ch for ch in model.strip() if ch.isalnum() or ch in "-._")[:80]
         raw["model"] = clean or DEFAULT_MODEL
@@ -444,6 +450,14 @@ class Refiner:
             self._known.add(sk)
             self._todo.append({**line, "earlier": earlier})
             self._lock.notify_all()
+
+    def wants(self, english: str) -> bool:
+        """Would `seen` ask about this line? Not when it is too short to be worth asking, or
+        was asked about already (its answer is stored, or it failed, or it is on its way)."""
+        en = normalize_english(english)
+        with self._lock:
+            return (not self._closed and sum(ch.isalpha() for ch in en) >= MIN_LETTERS
+                    and loose_key(en) not in self._known)
 
     def status(self) -> dict:
         with self._lock:

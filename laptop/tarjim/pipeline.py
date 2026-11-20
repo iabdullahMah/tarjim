@@ -41,6 +41,9 @@ PLATE_HIDES = 0.85
 FADE_IN_MS = 90
 FADE_OUT_MS = 140
 SIZE_LOCK_AFTER = 5  # lines measured before the Arabic font size is fixed for good
+# With "wait for the stronger translator" on, a line is held back this long at most for its
+# answer; after that the local Arabic goes up, so a slow or silent service never costs a line.
+AI_WAIT_MS = 1800.0
 # An early reading stands for the confirmed line only when it saw the whole of it: every text
 # line reaching as far left and right, within this share of a line's height.
 COVER_SLACK = 0.5
@@ -109,6 +112,7 @@ class _Job:
     render_ms: float = 0.0
     reason: str = ""  # why the line was not shown (for the session log)
     source: str = ""  # where the Arabic came from (CachedTranslator.last_source)
+    waited: bool = False  # it was held back for the stronger translator's answer
     style: render.Style | None = None  # the look it was drawn in
     text_layer: render.RgbaLayer | None = None
 
@@ -159,6 +163,15 @@ class Pipeline:
         self.refiner = None
         self.on_better = None  # optional callback(english, arabic) when a line was rewritten
         self.bettered = 0  # lines rewritten in place
+        # One Arabic per line: while the stronger translator is answering, a line waits for its
+        # answer instead of going up in the local Arabic first and changing a second later.
+        # The local Arabic is then only what is shown when no answer comes in time.
+        self.ai_first = False
+        self.ai_wait_ms = AI_WAIT_MS
+        self.ai_shown = 0  # lines that went up in the stronger translator's Arabic after waiting
+        self.ai_late = 0  # lines whose answer did not come in time (local Arabic shown)
+        self._wait_job: _Job | None = None
+        self._wait_until = 0.0
         self._shown_job: _Job | None = None
         self._plate_up = False
         self._sizes: list[int] = []
@@ -220,6 +233,8 @@ class Pipeline:
                     self._maybe_start_early(frame, block, t_capture)
                 if self._holding:
                     self._hold_tick()
+                if self._wait_job is not None:
+                    self._wait_tick()
             except TvLinkError:
                 self._text_up = False  # the TV clears by itself when the link drops
                 self._holding = False
@@ -337,6 +352,35 @@ class Pipeline:
             return
         if not self.enabled or job.text_layer is None:
             return
+        if self._wait_job is not None and self._wait_job is not job:
+            # another line was still waiting for its answer: it goes up in the local Arabic now
+            # rather than not at all
+            waiting, self._wait_job = self._wait_job, None
+            self.ai_late += 1
+            self._show(waiting)
+        if (self.ai_first and self.refiner is not None and job.source not in ("fix", "better")
+                and self.refiner.state == "ok" and self.refiner.wants(job.english)):
+            self._wait_job = job
+            job.waited = True
+            self._wait_until = now_ms() + self.ai_wait_ms
+            self.refiner.seen(job.english, job.speaker, wanted=True)
+            return
+        self._show(job)
+
+    def _wait_tick(self) -> None:
+        """A line is waiting for the stronger translator: when its time is up, or the service
+        stopped answering, it goes up in the local Arabic."""
+        job = self._wait_job
+        if job is None:
+            return
+        if now_ms() >= self._wait_until or self.refiner is None or self.refiner.state != "ok":
+            self._wait_job = None
+            self.ai_late += 1
+            self._show(job)
+
+    def _show(self, job: _Job) -> None:
+        """Draw a line's Arabic on the TV (called with the lock held)."""
+        asked = job.waited  # the stronger translator was already asked about this line
         still_there = self.tracker.shown is not None and mask_iou(self.tracker.shown, job.block) >= SAME_BLOCK_IOU
         frame = self._latest if self._latest is not None else job.frame
         t = time.perf_counter()
@@ -385,7 +429,7 @@ class Pipeline:
         }
         if self.on_line is not None:
             self.on_line(job.english, job.arabic)
-        if self.refiner is not None:
+        if self.refiner is not None and not asked:
             # the user's own wording and an answer stored before need no asking again
             self.refiner.seen(job.english, job.speaker, wanted=job.source not in ("fix", "better"))
 
@@ -393,6 +437,25 @@ class Pipeline:
         """The stronger translator's Arabic for a line (called from its thread). It is stored
         already; when that line is still the one on the TV, its Arabic is rewritten in place."""
         with self._lock:
+            waiting = self._wait_job
+            if waiting is not None and normalize_english(waiting.english) == english:
+                # the line was held back for this answer: it goes up once, in this Arabic
+                self._wait_job = None
+                if self.enabled and arabic:
+                    try:
+                        waiting.text_layer = render.make_text(waiting.frame, waiting.block, arabic,
+                                                              waiting.style or self.style)
+                        waiting.arabic, waiting.source = arabic, "better"
+                        self.ai_shown += 1
+                    except Exception:
+                        self.ai_late += 1  # it could not be drawn: the local Arabic goes up
+                    try:
+                        self._show(waiting)
+                    except TvLinkError:
+                        self._text_up = False
+                return
+            if self.ai_first:
+                return  # one Arabic per line: an answer that came late is kept for next time only
             job = self._shown_job
             if (job is None or not self._text_up or not self.enabled or job.text_layer is None
                     or normalize_english(job.english) != english or arabic == job.arabic):
@@ -495,6 +558,7 @@ class Pipeline:
                     pass
                 if self._job is not None:
                     self._job.cancelled = True
+                self._wait_job = None
                 self.tracker.reset()
 
     def wait_idle(self, timeout: float = 5.0) -> None:

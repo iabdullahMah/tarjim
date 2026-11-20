@@ -593,6 +593,7 @@ function showGemini(g) {
   S.gemini = g;
   $("#gemini-card").hidden = false;
   $("#gemini-on").checked = g.enabled;
+  $("#gemini-wait").checked = g.wait !== false;
   $("#gemini-on").disabled = !g.has_key;
   $("#gemini-model").value = g.model;
   $("#gemini-forget").hidden = !g.has_key;
@@ -669,6 +670,9 @@ async function loadGemini() {
       showGemini(g);
       toast(`المفتاح شغّال ✓ «${r.sample}»`);
     } catch (e) { toast(e.message); } finally { btn.disabled = false; }
+  };
+  $("#gemini-wait").onchange = async e => {
+    try { showGemini(g = await api("/api/gemini", { wait: e.target.checked })); toast("انحفظ ✓"); } catch (err) { toast(err.message); }
   };
   $("#gemini-on").onchange = async e => {
     try { showGemini(g = await api("/api/gemini", { enabled: e.target.checked })); toast("انحفظ ✓"); } catch (err) { toast(err.message); }

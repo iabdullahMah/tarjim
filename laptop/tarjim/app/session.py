@@ -233,8 +233,9 @@ class LiveSession:
         refiner.on_better = pipe.better_arrived
         refiner.log = pipe.log_record  # every change of its state goes into the session log
         pipe.on_better = on_better
+        pipe.ai_first = bool(g["wait"])
         pipe.refiner = self.refiner = refiner
-        pipe.log_record({"kind": "gemini", "state": "on", "dialect": refiner.dialect,
+        pipe.log_record({"kind": "gemini", "state": "on", "dialect": refiner.dialect, "wait": pipe.ai_first,
                          "keys": [f"{p.name}:{p.model}" for p in refiner.providers]})
 
     def apply_gemini(self) -> bool:

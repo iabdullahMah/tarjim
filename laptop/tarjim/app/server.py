@@ -253,7 +253,7 @@ def gemini_view() -> dict:
     refiner = live.refiner
     return {
         "has_key": bool(g["key"]), "tail": g["key"][-4:] if len(g["key"]) >= 12 else "",
-        "enabled": g["enabled"], "model": g["model"], "default_model": gemini.DEFAULT_MODEL,
+        "enabled": g["enabled"], "wait": g["wait"], "model": g["model"], "default_model": gemini.DEFAULT_MODEL,
         "stored": stored, "status": refiner.status() if refiner is not None else None,
         # more keys: never the key itself, only what tells one from another
         "extra": [{"id": i["id"], "name": i["name"], "model": i["model"], "tail": i["key"][-4:]}
@@ -299,6 +299,7 @@ def gemini_save(body: dict) -> dict:
         key=str(key) if key is not None else None,
         enabled=bool(body["enabled"]) if "enabled" in body else None,
         model=str(body["model"]) if "model" in body else None,
+        wait=bool(body["wait"]) if "wait" in body else None,
     )
     live.apply_gemini()  # a running session starts (or stops) using it at once
     return gemini_view()
