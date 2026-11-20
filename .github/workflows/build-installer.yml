@@ -1,0 +1,153 @@
+# Builds Tarjim-Setup-<version>.exe on a Windows machine of GitHub's, with everything the
+# installer carries: the program, its Python and libraries, the translation model, adb, and
+# the TV and phone apps. The finished installer is installed silently and asked to test
+# itself before it is published as a pre-release.
+#
+# It runs when started by hand (Actions > Build installer > Run workflow), and when this
+# file or the installer's version (laptop/launcher/build_setup.py) changes on a work branch.
+name: Build installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+    paths:
+      - ".github/workflows/build-installer.yml"
+      - "laptop/launcher/build_setup.py"
+
+permissions:
+  contents: write  # to publish the pre-release
+
+concurrency:
+  group: build-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Python environment
+        working-directory: laptop
+        run: uv sync
+
+      # -- the translation model (not in git) ------------------------------------------------
+      - name: Translation model (ready-made conversion)
+        id: model
+        continue-on-error: true
+        working-directory: laptop
+        run: uv run --with huggingface_hub python launcher/fetch_model.py
+
+      - name: Translation model (converted here, if the ready-made one is gone)
+        if: steps.model.outcome == 'failure'
+        working-directory: laptop
+        run: |
+          $out = "..\models\opus-mt-tc-big-en-ar-ct2"
+          if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+          uv run --no-project --python 3.12 --with ctranslate2 --with transformers --with torch --with sentencepiece --with sacremoses `
+            ct2-transformers-converter --model Helsinki-NLP/opus-mt-tc-big-en-ar --output_dir $out --quantization int8
+          if ($LASTEXITCODE -ne 0) { throw "converting the model failed" }
+          uv run --with huggingface_hub python launcher/fetch_model.py
+
+      # -- adb, and the two Android apps -----------------------------------------------------
+      - name: adb (platform-tools)
+        run: |
+          New-Item -ItemType Directory -Force .tools | Out-Null
+          Invoke-WebRequest "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile pt.zip
+          Expand-Archive pt.zip -DestinationPath .tools -Force
+          Remove-Item pt.zip
+          & .tools\platform-tools\adb.exe version
+
+      - name: TV app
+        working-directory: tv-app
+        run: |
+          .\gradlew.bat --no-daemon assembleDebug
+          if ($LASTEXITCODE -ne 0) { throw "building the TV app failed" }
+
+      - name: Phone remote app
+        working-directory: phone-app
+        run: |
+          .\gradlew.bat --no-daemon assembleDebug
+          if ($LASTEXITCODE -ne 0) { throw "building the phone app failed" }
+
+      # -- tests (reported, not blocking: two of them depend on the machine's timing) ---------
+      - name: Tests
+        continue-on-error: true
+        working-directory: laptop
+        run: uv run pytest -q
+
+      # -- the installer ---------------------------------------------------------------------
+      - name: Tarjim.exe and the installer
+        working-directory: laptop
+        run: |
+          uv sync --no-dev
+          uv run --no-sync python launcher/build.py
+          if ($LASTEXITCODE -ne 0) { throw "building Tarjim.exe failed" }
+          uv run --no-sync python launcher/build_setup.py
+          if ($LASTEXITCODE -ne 0) { throw "building the installer failed" }
+
+      - name: Install it and let it test itself
+        run: |
+          $setup = (Get-ChildItem dist\Tarjim-Setup-*.exe)[0].FullName
+          $folder = Join-Path $env:RUNNER_TEMP "TarjimTest"
+          $p = Start-Process -FilePath $setup -ArgumentList "/S", "/D=$folder" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the silent install failed ($($p.ExitCode))" }
+          $report = Join-Path $env:RUNNER_TEMP "selftest.json"
+          $p = Start-Process -FilePath (Join-Path $folder "Tarjim.exe") -ArgumentList "--selftest", $report -Wait -PassThru
+          Get-Content $report
+          $facts = Get-Content $report -Raw | ConvertFrom-Json
+          if ($p.ExitCode -ne 0 -or -not $facts.ok) { throw "the installed program failed its own test" }
+          foreach ($need in "model", "tv_apk", "phone_apk", "fonts") {
+            if (-not $facts.$need) { throw "the installed program is missing: $need" }
+          }
+          # the installed copy translates one line with its own Python and model
+          $py = Join-Path $folder "python\python.exe"
+          Push-Location (Join-Path $folder "laptop")
+          $env:PYTHONPATH = (Join-Path $folder "laptop") + ";" + (Join-Path $folder "laptop\.venv\Lib\site-packages")
+          & $py -c "import sys; sys.stdout.reconfigure(encoding='utf-8'); from tarjim.translate import OpusTranslator; print(OpusTranslator().translate('Wait here, I will be right back.'))"
+          if ($LASTEXITCODE -ne 0) { throw "the installed program could not translate" }
+          Pop-Location
+
+      - name: Collect the files
+        id: files
+        run: |
+          $version = (Select-String -Path laptop\launcher\build_setup.py -Pattern '^VERSION = "(.+)"').Matches[0].Groups[1].Value
+          Copy-Item tv-app\app\build\outputs\apk\debug\app-debug.apk "dist\Tarjim-TV-$version.apk"
+          Copy-Item phone-app\app\build\outputs\apk\debug\app-debug.apk "dist\Tarjim-Phone-Remote-$version.apk"
+          Remove-Item dist\setup-stub.exe -ErrorAction SilentlyContinue
+          Get-ChildItem dist | ForEach-Object { "{0}  {1:N0} MB  sha256 {2}" -f $_.Name, ($_.Length / 1MB), (Get-FileHash $_.FullName).Hash }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarjim-${{ steps.files.outputs.version }}
+          path: dist/*
+          compression-level: 0
+          retention-days: 14
+
+      - name: Publish as a pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.files.outputs.version }}-build${{ github.run_number }}
+          name: Tarjim ${{ steps.files.outputs.version }} (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          body: |
+            Built automatically from `${{ github.ref_name }}` at ${{ github.sha }}.
+            The installer was installed silently on the build machine and passed its own test there;
+            it has not been tried with a TV or a console.
+          files: dist/*

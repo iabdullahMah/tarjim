@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 LAPTOP = HERE.parent
 REPO = LAPTOP.parent
 DIST = REPO / "dist"
-VERSION = "0.4.5"
+VERSION = "0.5.0"
 MAGIC = b"TARJIMZ1"
 
 SKIP_DIRS = {"__pycache__", "_pytest", "pytest", "test", "tests", "idlelib", "tkinter", "turtledemo", "ensurepip",
