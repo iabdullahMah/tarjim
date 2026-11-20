@@ -26,7 +26,7 @@ from .translate import CachedTranslator, TranslateError
 from .tvlink import TvLink, TvLinkError, now_ms
 from .vision import render
 from .vision.detect import Block, DetectParams, detect, mask_iou
-from .vision.ocr import OcrEngine
+from .vision.ocr import MIN_SCORE, OcrEngine
 from .vision.tracker import Event, SubtitleTracker, TrackParams
 
 LAYER_TTL_MS = 700
@@ -41,6 +41,22 @@ PLATE_HIDES = 0.85
 FADE_IN_MS = 90
 FADE_OUT_MS = 140
 SIZE_LOCK_AFTER = 5  # lines measured before the Arabic font size is fixed for good
+# An early reading stands for the confirmed line only when it saw the whole of it: every text
+# line reaching as far left and right, within this share of a line's height.
+COVER_SLACK = 0.5
+
+
+def covers(early: Block, final: Block) -> bool:
+    """True when `early` (the block a reading started from) holds all of `final` (the line once
+    it stopped changing). A line still being written matches the finished one closely enough
+    to pass for it, and its reading then lacks the last word."""
+    if len(early.lines) != len(final.lines):
+        return len(early.lines) > len(final.lines)
+    for a, b in zip(sorted(early.lines, key=lambda l: l.y0), sorted(final.lines, key=lambda l: l.y0)):
+        slack = COVER_SLACK * (b.y1 - b.y0)
+        if a.x0 > b.x0 + slack or a.x1 < b.x1 - slack:
+            return False
+    return True
 
 
 def reading_time_ms(arabic: str) -> float:
@@ -91,6 +107,7 @@ class _Job:
     ocr_ms: float = 0.0
     mt_ms: float = 0.0
     render_ms: float = 0.0
+    reason: str = ""  # why the line was not shown (for the session log)
     text_layer: render.RgbaLayer | None = None
 
 
@@ -223,7 +240,8 @@ class Pipeline:
         if not self.enabled or self.tracker.is_rejected(block):
             return
         job = self._job
-        if job is not None and not job.cancelled and mask_iou(job.block, block) >= SAME_BLOCK_IOU:
+        if (job is not None and not job.cancelled and mask_iou(job.block, block) >= SAME_BLOCK_IOU
+                and covers(job.block, block)):
             return  # already working on this line
         if job is not None and not job.done:
             return  # busy with another text (typewriter text grows each frame): wait for it
@@ -241,10 +259,14 @@ class Pipeline:
                 job.text_layer = render.make_text(job.frame, job.block, job.arabic, self._style_for(job.block))
                 job.render_ms = (time.perf_counter() - t) * 1000.0
                 job.ok = True
-        except TranslateError:
+            elif not read.ok:
+                job.reason = "low_score" if read.score < MIN_SCORE else "not_speech"
+        except TranslateError as exc:
             job.ok = False
-        except Exception:  # a worker crash must not kill the frame loop; the line is skipped
+            job.reason = f"translate: {str(exc)[:200]}"
+        except Exception as exc:  # a worker crash must not kill the frame loop; the line is skipped
             job.ok = False
+            job.reason = f"error: {type(exc).__name__}: {str(exc)[:200]} @ {_where(exc)}"
         with self._lock:
             job.done = True
             self.times.ocr.append(job.ocr_ms)
@@ -274,7 +296,8 @@ class Pipeline:
 
     def _on_new(self, frame: np.ndarray, block: Block, t_capture: float) -> None:
         job = self._job
-        if job is not None and not job.cancelled and mask_iou(job.block, block) >= SAME_BLOCK_IOU:
+        if (job is not None and not job.cancelled and mask_iou(job.block, block) >= SAME_BLOCK_IOU
+                and covers(job.block, block)):
             job.want_show = True
             job.t_stable = now_ms()
             if job.done:
@@ -290,6 +313,12 @@ class Pipeline:
         job.shown = True
         if not job.ok:
             self.rejected += 1
+            # Why a line seen on screen got no Arabic: without this a session that shows
+            # nothing leaves nothing to look at afterwards.
+            self._write_log({
+                "kind": "rejected", "reason": job.reason or "unknown", "t": job.t_first,
+                "en": job.english, "ocr_score": round(job.score, 3), "ocr_ms": round(job.ocr_ms, 1),
+            })
             if self.tracker.shown is not None and mask_iou(self.tracker.shown, job.block) >= SAME_BLOCK_IOU:
                 self.tracker.reject()
             return
@@ -475,6 +504,14 @@ class Pipeline:
             if self._log:
                 self._log.close()
                 self._log = None
+
+
+def _where(exc: BaseException) -> str:
+    """File and line of the deepest frame of an error, for the session log."""
+    tb = exc.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    return f"{Path(tb.tb_frame.f_code.co_filename).name}:{tb.tb_lineno}" if tb is not None else "?"
 
 
 def new_log_path() -> Path:

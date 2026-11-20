@@ -301,3 +301,62 @@ def test_qr_code_reads_back_as_the_pairing_link():
     img = np.kron(1 - matrix, np.ones((8, 8), np.uint8)) * 255
     img = cv2.copyMakeBorder(img, 32, 32, 32, 32, cv2.BORDER_CONSTANT, value=255)
     assert cv2.QRCodeDetector().detectAndDecode(img)[0] == link
+
+
+# -- the user's own lines, found again when the reader reads them a little differently ---------
+
+
+def test_loose_key_ignores_the_readers_slips_and_nothing_else():
+    from tarjim.translate import loose_key
+
+    same = ["I'm fine. Let's go!", "l'm fine, lets go", "I'm fine.Let's  go", "I’m Fine. let's go"]
+    assert len({loose_key(t) for t in same}) == 1
+    assert loose_key("It's 10 o'clock") == loose_key("lt's 1O o'clock")
+    # a different word is a different line: no letter is added, dropped or swapped
+    assert loose_key("Don't fail me.") != loose_key("Don't fall me.")
+    assert loose_key("We can go now.") != loose_key("We can't go now.")
+    assert loose_key("He is here.") != loose_key("She is here.")
+    assert loose_key("...") == ""
+
+
+def test_a_fixed_line_is_found_when_read_a_little_differently():
+    engine, tr = make({})
+    tr.fix("I'm fine. Let's go, Ill wait.", "أنا بخير. هيا بنا")
+    calls = len(engine.calls)
+    for read in ("l'm fine. Lets go, Ill wait.", "I'm fine, Let's go,Ill wait", "I'm fine. let's go, lll wait!"):
+        ar, hit, _ms = tr.translate(read)
+        assert (ar, hit) == ("أنا بخير. هيا بنا", True), read
+    assert len(engine.calls) == calls  # the engine was never asked
+    # the line on screen asks: the Arabic asks too
+    assert tr.translate("l'm fine. Lets go, Ill wait?")[0] == "أنا بخير. هيا بنا؟"
+    # another line is still the engine's
+    assert tr.translate("I'm fine. Let's go, I'll walk.")[0] != "أنا بخير. هيا بنا"
+
+
+def test_two_fixed_lines_with_one_loose_key_are_not_guessed_between():
+    engine, tr = make({})
+    tr.fix("Well, go.", "حسناً، اذهب.")
+    tr.fix("We'll go.", "سنذهب.")
+    assert tr.translate("Well, go.")[0] == "حسناً، اذهب."  # the exact line always wins
+    assert tr.translate("We'll go.")[0] == "سنذهب."
+    assert tr.translate("WELL GO")[0] not in ("حسناً، اذهب.", "سنذهب.")
+
+
+def test_an_older_cache_file_gets_loose_keys_for_its_lines(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite"
+    db = sqlite3.connect(str(path))
+    db.execute("CREATE TABLE fix (profile TEXT, en TEXT, ar TEXT, ts REAL, PRIMARY KEY (profile, en))")
+    db.execute("INSERT INTO fix VALUES ('p', 'I told you, wait here.', 'قلت لك انتظر هنا.', 1.0)")
+    db.commit()
+    db.close()
+    cache = Cache(path)
+    try:
+        assert cache.get_fix("p", "I told you, wait here.") == "قلت لك انتظر هنا."
+        assert cache.get_fix_loose("p", "l told you wait here") == "قلت لك انتظر هنا."
+        assert cache.add_fixes("p", [("Stay close.", "ابقَ قريباً.")]) == 1
+        assert cache.get_fix_loose("p", "STAY CLOSE") == "ابقَ قريباً."
+    finally:
+        cache.close()
+    Cache(path).close()  # opening it again changes nothing

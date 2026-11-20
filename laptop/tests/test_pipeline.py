@@ -376,3 +376,80 @@ def test_background_modes(ocr, mode, opacity, shown, held):
             pipe.process(empty.frame, 30.0 + i * 0.033)  # English leaves: the Arabic is held as it is
         assert _wait(lambda: tv.layer_ids() == held)  # the fill goes with the English; the look stays
         pipe.close()
+
+
+def test_a_line_read_before_it_was_whole_is_read_again(ocr):
+    """The reading starts at first sight. When the line was still being written then, and the
+    finished line is close enough to pass for the same one, it used to go up without its last
+    word. The finished line is read again."""
+    line = "We should leave before the storm gets here."
+    frames = synth.typewriter_frames(line, hold=14)
+    part, whole = frames[len(line) - 6], frames[-1]  # "... the storm gets" and the whole line
+    asked, shown = [], []
+
+    class EchoEngine:
+        name = "echo"
+
+        def translate(self, text, context=None):
+            asked.append(text)
+            return "سطر."
+
+    with FakeTv() as tv, TvLink(tv.host, tv.port) as link:
+        link.connect()
+        pipe = Pipeline(link, CachedTranslator(EchoEngine(), Cache(":memory:")), ocr)
+        pipe.on_line = lambda en, ar: shown.append(en)
+        pipe.process(part, 10.0)
+        pipe.wait_idle()  # the early reading of the unfinished line is done
+        assert asked and not asked[-1].rstrip().endswith("here.")
+        for i in range(1, 10):
+            pipe.process(whole, 10.0 + i * 0.033)
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"])
+        assert shown == [line]
+        pipe.close()
+
+
+def test_covers_tells_a_whole_line_from_one_still_being_written():
+    from tarjim.pipeline import covers
+
+    line = "We should leave before the storm gets here."
+    frames = synth.typewriter_frames(line, hold=1)
+    whole, part = detect(frames[-1]), detect(frames[len(line) - 6])
+    assert covers(whole, whole) and covers(whole, part) and not covers(part, whole)
+    two = detect(synth.make_samples(4, 0, seed=7)[3].frame)
+    assert len(two.lines) == 2 and covers(two, two)
+
+
+def test_a_line_that_gets_no_arabic_leaves_its_reason_in_the_log(ocr, tmp_path):
+    import json
+
+    rng = np.random.default_rng(5)
+    label, _ = synth.draw_subtitle(synth.background(rng, "dark"), ["OLD TOWN ROAD"], "shadow", 42, 1000)
+    speech = synth.make_samples(1, 0, seed=12)[0]
+
+    class BrokenEngine:
+        name = "broken"
+
+        def translate(self, text, context=None):
+            raise RuntimeError("engine fell over")
+
+    log = tmp_path / "session.jsonl"
+    with FakeTv() as tv, TvLink(tv.host, tv.port) as link:
+        link.connect()
+        pipe = Pipeline(link, CachedTranslator(BrokenEngine(), Cache(":memory:")), ocr, log_path=log)
+        t = 10.0
+        for frame in (label, speech.frame):
+            for _ in range(8):
+                pipe.process(frame, t)
+                t += 0.033
+            pipe.wait_idle()
+            pipe.process(frame, t)
+            for _ in range(4):  # the picture goes empty between the two
+                t += 0.033
+                pipe.process(np.zeros_like(frame), t)
+        assert pipe.rejected == 2 and tv.layer_ids() == []
+        pipe.close()
+    recs = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
+    assert [r["kind"] for r in recs] == ["rejected", "rejected"]
+    assert recs[0]["reason"] == "not_speech" and recs[0]["en"] == "OLD TOWN ROAD"
+    assert recs[1]["reason"].startswith("error: RuntimeError: engine fell over @ test_pipeline.py:")
+    assert recs[1]["en"] == speech.text

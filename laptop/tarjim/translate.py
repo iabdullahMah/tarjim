@@ -409,6 +409,34 @@ def normalize_english(text: str) -> str:
     return _WS.sub(" ", text).strip()
 
 
+_LOOSE_SAME = str.maketrans({"I": "l", "|": "l", "1": "l", "0": "o"})
+_LOOSE_DROP = re.compile(r"[^a-z0-9]+")
+
+
+def loose_key(text: str) -> str:
+    """A line as the reader's slips leave it: no spacing or punctuation, small and capital
+    letters alike, and the letters the reader mixes up counted as one (capital I, small l, 1
+    and |; O and 0). A line read all in capitals is the one case it does not bring together.
+
+    "l'm fine, lets go" and "I'm fine. Let's go!" have the same loose key, so a line the user
+    rewrote is found again when the reader reads it a little differently. Small i and small l
+    stay apart ("fail" is not "fall"), and no letter is ever added or dropped.
+    """
+    return _LOOSE_DROP.sub("", normalize_english(text).translate(_LOOSE_SAME).lower())
+
+
+def _end_like(arabic: str, english: str) -> str:
+    """A line found by its loose key may differ from the stored one in its last mark only
+    ("You did it." and "You did it?"): the Arabic takes the question mark of the line on screen."""
+    asks = english.rstrip("\"') ").endswith("?")
+    body = arabic.rstrip()
+    if asks and not body.endswith("؟"):
+        return body.rstrip(".!،… ") + "؟"
+    if not asks and body.endswith("؟"):
+        return body[:-1].rstrip() + "."
+    return arabic
+
+
 _ANY_REWRITE_RX = re.compile("|".join(f"(?:{rx.pattern})" for rx, _ in _EN_REWRITES), flags=re.IGNORECASE)
 
 
@@ -632,8 +660,18 @@ class Cache:
         )
         # A line the user corrected by hand always wins over the engine.
         self._db.execute(
-            "CREATE TABLE IF NOT EXISTS fix (profile TEXT, en TEXT, ar TEXT, ts REAL, PRIMARY KEY (profile, en))"
+            "CREATE TABLE IF NOT EXISTS fix (profile TEXT, en TEXT, ar TEXT, ts REAL, sk TEXT,"
+            " PRIMARY KEY (profile, en))"
         )
+        # `sk` is the line's loose key (see loose_key). A cache file made before it existed gets
+        # the column now, filled in for the lines already there.
+        if "sk" not in {row[1] for row in self._db.execute("PRAGMA table_info(fix)")}:
+            self._db.execute("ALTER TABLE fix ADD COLUMN sk TEXT")
+        old = self._db.execute("SELECT profile, en FROM fix WHERE sk IS NULL").fetchall()
+        if old:
+            self._db.executemany("UPDATE fix SET sk=? WHERE profile=? AND en=?",
+                                 [(loose_key(en), profile, en) for profile, en in old])
+        self._db.execute("CREATE INDEX IF NOT EXISTS fix_sk ON fix (profile, sk)")
         # How the engine writes a glossary name on its own (see NameGuard).
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS names (engine TEXT, en TEXT, mode TEXT, variant TEXT,"
@@ -646,11 +684,24 @@ class Cache:
             row = self._db.execute("SELECT ar FROM fix WHERE profile=? AND en=?", (profile, en)).fetchone()
         return row[0] if row else None
 
+    def get_fix_loose(self, profile: str, en: str) -> str | None:
+        """The user's Arabic for a line that differs from `en` only by the reader's slips.
+        None when there is none, or when two such lines have different Arabic (no guessing)."""
+        sk = loose_key(en)
+        if not sk:
+            return None
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT ar FROM fix WHERE profile=? AND sk=? LIMIT 2", (profile, sk)
+            ).fetchall()
+        return rows[0][0] if len(rows) == 1 else None
+
     def put_fix(self, profile: str, en: str, ar: str | None) -> None:
         """Store the user's own Arabic for a line; None or empty removes it."""
         with self._lock:
             if ar:
-                self._db.execute("INSERT OR REPLACE INTO fix VALUES (?,?,?,?)", (profile, en, ar, time.time()))
+                self._db.execute("INSERT OR REPLACE INTO fix (profile, en, ar, ts, sk) VALUES (?,?,?,?,?)",
+                                 (profile, en, ar, time.time(), loose_key(en)))
             else:
                 self._db.execute("DELETE FROM fix WHERE profile=? AND en=?", (profile, en))
             self._db.commit()
@@ -660,8 +711,8 @@ class Cache:
         Returns how many were added."""
         with self._lock:
             before = self._db.total_changes
-            self._db.executemany("INSERT OR IGNORE INTO fix VALUES (?,?,?,?)",
-                                 [(profile, en, ar, time.time()) for en, ar in rows if en and ar])
+            self._db.executemany("INSERT OR IGNORE INTO fix (profile, en, ar, ts, sk) VALUES (?,?,?,?,?)",
+                                 [(profile, en, ar, time.time(), loose_key(en)) for en, ar in rows if en and ar])
             self._db.commit()
             return self._db.total_changes - before
 
@@ -1424,6 +1475,11 @@ class CachedTranslator:
         t0 = time.perf_counter()
         key = normalize_english(text)
         fixed = self.cache.get_fix(self.profile, key)
+        if fixed is None:
+            # the same line read a little differently (a capital I for a small l, a lost comma)
+            fixed = self.cache.get_fix_loose(self.profile, key)
+            if fixed is not None:
+                fixed = _end_like(fixed, key)
         if fixed is not None:
             return fixed, True, (time.perf_counter() - t0) * 1000.0
         matched = self._matched(key)
