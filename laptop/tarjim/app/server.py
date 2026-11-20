@@ -218,6 +218,7 @@ def gemini_save(body: dict) -> dict:
         enabled=bool(body["enabled"]) if "enabled" in body else None,
         model=str(body["model"]) if "model" in body else None,
     )
+    live.apply_gemini()  # a running session starts (or stops) using it at once
     return gemini_view()
 
 

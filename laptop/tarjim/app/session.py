@@ -201,6 +201,48 @@ class LiveSession:
         threading.Thread(target=self._prepare_names, args=(pipe.translator,), daemon=True).start()
         return True
 
+    def _attach_gemini(self, pipe, profile: str, prof: dict) -> None:
+        """Give the running session the stronger translator (gemini.py) when the user has a key
+        and it is switched on; take it away otherwise. The local Arabic still goes up first;
+        its answer rewrites the line and is kept for next time."""
+        from .. import gemini
+        from ..translate import Cache
+
+        old = pipe.refiner
+        pipe.refiner = self.refiner = None
+        if old is not None:
+            old.close()
+        g = gemini.settings()
+        if not (g["key"] and g["enabled"]):
+            pipe.log_record({"kind": "gemini", "state": "off", "why": "no key" if not g["key"] else "switched off"})
+            return
+
+        def on_better(en: str, ar: str) -> None:
+            for item in self.lines:
+                if item["en"] == en:
+                    item["ar"] = ar
+            self.hub.publish("better", {"en": en, "ar": ar})
+
+        refiner = gemini.Refiner(Cache(), profile, key=g["key"], model=g["model"],
+                                 title=str(prof.get("title") or ""), dialect=pipe.translator.dialect,
+                                 glossary=dict(pipe.translator.glossary), female=set(pipe.translator.female),
+                                 base=gemini.API)
+        refiner.on_better = pipe.better_arrived
+        refiner.log = pipe.log_record  # every change of its state goes into the session log
+        pipe.on_better = on_better
+        pipe.refiner = self.refiner = refiner
+        pipe.log_record({"kind": "gemini", "state": "on", "model": g["model"], "dialect": refiner.dialect})
+
+    def apply_gemini(self) -> bool:
+        """The key or the switch changed while translating: it takes effect at once."""
+        from ..translate import load_profile
+
+        pipe = self._pipe
+        if pipe is None or self.state != "running":
+            return False
+        self._attach_gemini(pipe, self.profile, load_profile(self.profile))
+        return True
+
     @staticmethod
     def _prepare_names(translator, stop=None) -> None:
         try:
@@ -319,22 +361,7 @@ class LiveSession:
             from .. import gemini
 
             translator.dialect = gemini.dialect_of(profile, prof)
-            g = gemini.settings()
-            if g["key"] and g["enabled"]:
-                # A stronger translator beside the local one, with the user's own key. The local
-                # Arabic still goes up first; its answer rewrites the line and is kept for next time.
-                def on_better(en: str, ar: str) -> None:
-                    for item in self.lines:
-                        if item["en"] == en:
-                            item["ar"] = ar
-                    self.hub.publish("better", {"en": en, "ar": ar})
-
-                refiner = gemini.Refiner(Cache(), profile, key=g["key"], model=g["model"],
-                                         title=str(prof.get("title") or ""), dialect=translator.dialect,
-                                         glossary=glossary, female={str(n) for n in (prof.get("female") or [])})
-                refiner.on_better = pipe.better_arrived
-                pipe.on_better = on_better
-                pipe.refiner = self.refiner = refiner
+            self._attach_gemini(pipe, profile, prof)
 
             from .. import gta6
 

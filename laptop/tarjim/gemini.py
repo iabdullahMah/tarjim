@@ -228,6 +228,7 @@ class Refiner:
         self.gap_s = gap_s
         self.pauses_s = pauses_s
         self.on_better = None  # callback(english, arabic) when a line's better Arabic arrives
+        self.log = None  # callback(record) for the session log: each change of state, never the key
         self.state = "ok"  # ok | waiting (refused for now) | bad_key
         self.error = ""
         self.done = 0  # lines stored
@@ -312,8 +313,11 @@ class Refiner:
                 self._failed(batch, GeminiError("bad", type(exc).__name__))
                 continue
             with self._lock:
+                was = self.state if self.requests > 1 else ""
                 self.state, self.error, self._refusals = "ok", "", 0
                 self._not_before = time.monotonic() + self.gap_s
+            if was != "ok":
+                self._note({"state": "ok", "lines": len(batch)})  # the first answer, or back after a refusal
             for line, raw in zip(batch, out):
                 ar = normalize_arabic(raw)
                 if not _usable(line["en"], ar):
@@ -331,7 +335,15 @@ class Refiner:
                     except Exception:
                         pass  # drawing it now failed; it is stored for the next time all the same
 
+    def _note(self, rec: dict) -> None:
+        if self.log is not None:
+            try:
+                self.log({"kind": "gemini", **rec})
+            except Exception:
+                pass
+
     def _failed(self, batch: list[dict], exc: GeminiError) -> None:
+        self._note({"state": "failed", "why": exc.kind, "detail": exc.detail, "lines": len(batch)})
         with self._lock:
             self.error = friendly(exc)
             if exc.kind == "bad":  # these lines will not do better a second time

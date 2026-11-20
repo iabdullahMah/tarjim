@@ -324,3 +324,53 @@ def test_each_game_has_its_own_arabic(sandbox):
     server.profile_save({"name": "gta6", "dialect": "msa"})
     server.profile_save({"name": "gta6", "dialect": "klingon"})  # ignored
     assert (server.profile_view("pbz")["dialect"], server.profile_view("gta6")["dialect"]) == ("saudi", "msa")
+
+
+def test_every_change_of_state_goes_to_the_session_log_without_the_key(google):
+    google.plan = [429]
+    notes = []
+    r = refiner(google, Cache(":memory:"), pauses_s=(0.1,))
+    r.log = notes.append
+    r.seen("The first line that was said here.")
+    assert _wait(lambda: r.status()["done"] == 1)
+    r.close()
+    assert [(n["kind"], n["state"]) for n in notes] == [("gemini", "failed"), ("gemini", "ok")]
+    assert notes[0]["why"] == "quota" and KEY not in json.dumps(notes)
+
+
+def test_a_key_given_while_translating_is_used_at_once(sandbox, google, monkeypatch):
+    """The key used to count only from the next start: a user who pasted it while playing got
+    no better Arabic for the whole session, and nothing said why."""
+    from tarjim.app import server
+    from tarjim.app.session import Hub, LiveSession
+
+    monkeypatch.setattr(gemini, "API", google.base)
+    logged = []
+
+    class Pipe:  # what the session needs of a running pipeline
+        refiner = None
+        on_better = None
+        translator = CachedTranslator(type("E", (), {"name": "e", "translate": lambda self, t, context=None: "سطر."})(),
+                                      Cache(":memory:"), profile="default")
+
+        def better_arrived(self, en, ar):
+            pass
+
+        def log_record(self, rec):
+            logged.append(rec)
+
+    session = LiveSession(Hub())
+    session._pipe, session.state, session.profile = Pipe(), "running", "default"
+    monkeypatch.setattr(server, "live", session)
+    assert session.apply_gemini() and Pipe.refiner is None and logged[-1]["why"] == "no key"
+    server.gemini_save({"key": "AIzaSy-a-long-test-key-1234", "enabled": True})
+    r = session._pipe.refiner
+    assert r is not None and session.refiner is r and logged[-1]["state"] == "on"
+    r.gap_s = 0.0
+    r.seen("Where did you hide the money?")
+    assert _wait(lambda: r.status()["done"] == 1)
+    server.gemini_save({"enabled": False})  # switched off: taken away at once
+    assert session._pipe.refiner is None and logged[-1]["why"] == "switched off"
+    assert "AIzaSy" not in json.dumps(logged, default=str)
+    session.state = "idle"
+    assert session.apply_gemini() is False
