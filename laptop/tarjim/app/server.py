@@ -969,6 +969,9 @@ def _ask_running_copy_to_show() -> None:
 
 def main(window: bool = True) -> int:
     os.environ.setdefault("PYTHONUTF8", "1")
+    from .. import say
+
+    say.setup_console()  # a Windows in another language gives streams that cannot hold Arabic
     os.environ.pop("__PYVENV_LAUNCHER__", None)  # set by Tarjim.exe for this process only
     if _port_open(HOST, PORT, 0.4):  # already running: bring its window forward instead of a second copy
         if window:

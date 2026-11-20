@@ -8,7 +8,10 @@ import sys
 def setup_console() -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
 
 
 _hook = None
@@ -28,26 +31,40 @@ def _emit(kind: str, msg: str) -> None:
             pass
 
 
+def _print(text: str, error: bool = False) -> None:
+    """Print for whoever watches a console. The desktop program has none, and on a Windows
+    whose language is not Arabic its output stream cannot hold Arabic letters: the message
+    already reached the interface through the hook, so a stream that refuses it is ignored
+    (it used to stop the TV setup with "'charmap' codec can't encode characters")."""
+    stream = sys.stderr if error else sys.stdout
+    if stream is None:
+        return
+    try:
+        print(text, file=stream, flush=True)
+    except (UnicodeError, OSError, ValueError):
+        pass
+
+
 def step(msg: str) -> None:
     _emit("step", msg)
-    print(f"… {msg}", flush=True)
+    _print(f"… {msg}")
 
 
 def ok(msg: str) -> None:
     _emit("ok", msg)
-    print(f"✔ {msg}", flush=True)
+    _print(f"✔ {msg}")
 
 
 def info(msg: str) -> None:
     _emit("info", msg)
-    print(f"  {msg}", flush=True)
+    _print(f"  {msg}")
 
 
 def warn(msg: str) -> None:
     _emit("warn", msg)
-    print(f"⚠ {msg}", flush=True)
+    _print(f"⚠ {msg}")
 
 
 def fail(msg: str) -> None:
     _emit("fail", msg)
-    print(f"✖ {msg}", file=sys.stderr, flush=True)
+    _print(f"✖ {msg}", error=True)

@@ -92,3 +92,27 @@ def test_selfcheck_passes_on_faketv_and_fails_when_missing():
         shot.save(buf, format="PNG")
         (__import__("pathlib").Path(__file__).parent / "out").mkdir(exist_ok=True)
         (__import__("pathlib").Path(__file__).parent / "out" / "patterns.png").write_bytes(buf.getvalue())
+
+
+def test_a_message_never_fails_on_a_stream_that_cannot_hold_arabic(monkeypatch):
+    """On a Windows in another language the program's output stream is "charmap": printing an
+    Arabic progress message there used to stop the TV setup."""
+    import io
+    import sys
+
+    from tarjim import say
+
+    got = []
+    say.set_hook(lambda kind, msg: got.append((kind, msg)))
+    try:
+        for stream in (io.TextIOWrapper(io.BytesIO(), encoding="cp1252"), None):
+            monkeypatch.setattr(sys, "stdout", stream)
+            monkeypatch.setattr(sys, "stderr", stream)
+            say.step("أتصل بالتلفزيون…")
+            say.ok("تم")
+            say.info("شوف شاشة التلفزيون")
+            say.warn("انتبه")
+            say.fail("ما قدرت")
+    finally:
+        say.set_hook(None)
+    assert len(got) == 10 and got[0] == ("step", "أتصل بالتلفزيون…")
