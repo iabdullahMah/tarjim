@@ -1369,7 +1369,7 @@ def _swap_proxy(raw: str, swaps: list[tuple[str, str]]) -> tuple[str, bool]:
     return raw, all_found
 
 
-RULES = "r7"  # raise when the rules around the engine change, so the cache does not serve old output
+RULES = "r8"  # raise when the rules around the engine change, so the cache does not serve old output
 
 
 class CachedTranslator:

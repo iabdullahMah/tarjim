@@ -50,7 +50,10 @@ GAP_DOWN = 0.85  # ... and how much shorter after EASE_AFTER answers
 BATCH = 8  # lines in one request at most
 BACKLOG = 400  # lines kept waiting while requests are refused
 CONTEXT = 4  # earlier lines given with a request, so "he", "it" and the tone are understood
-TIMEOUT_S = 5.0  # an answer later than this is of no use to the line on the TV
+# An answer this late is of no use to the line on the TV, but it is still stored for the next
+# time. (Five seconds was tried: a request given up is asked again, which most likely counts
+# twice against the key's allowance, and more requests failed in the session that followed.)
+TIMEOUT_S = 8.0
 # After a refusal that is not about quota (the service busy, no answer in time): a session log
 # showed 44 of these in 83 minutes, each one keeping its key silent for ten seconds or more.
 NET_PAUSES_S = (3.0, 8.0, 30.0, 120.0)

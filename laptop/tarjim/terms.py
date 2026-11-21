@@ -346,9 +346,15 @@ SERIES: dict[str, tuple[SeriesRule, ...]] = {
     ),
 }
 
+# "pills" with nothing in the line about birth control: the model writes «حبوب منع الحمل»
+# for any pill ("a real doctor, with real pills", "take a pill for it").
+_PILLS_EN = re.compile(r"^(?!.*\b(?:birth[- ]control|contracepti\w*|on the pill)\b).*\bpills?\b", _I)
+
 # Arabic the model still gets wrong: (English that must be in the line or None, wrong, right).
 AR_FIXES: dict[str, tuple[tuple["re.Pattern | None", str, str], ...]] = {
     "": (
+        (_PILLS_EN, "حبوب منع الحمل", "الحبوب"),
+        (_PILLS_EN, "حبة منع الحمل", "الحبة"),
         (None, "بطاقات التموينية", "بطاقات التموين"),
         (re.compile(r"\bbachelor part(?:y|ies)\b", _I), "حزب البكالوريوس", "حفلة توديع العزوبية"),
         (re.compile(r"\bbachelor part(?:y|ies)\b", _I), "حفلة البكالوريوس", "حفلة توديع العزوبية"),

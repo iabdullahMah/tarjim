@@ -105,7 +105,7 @@ def test_one_word_is_not_worth_a_request_and_two_are(google):
 
 def test_a_busy_service_keeps_a_key_silent_for_seconds_not_for_long():
     assert gemini.NET_PAUSES_S[0] <= 3.0 < gemini.PAUSES_S[0]  # quota waits longer than a hiccup
-    assert gemini.TIMEOUT_S <= 5.0
+    assert gemini.TIMEOUT_S <= 8.0
 
 
 def test_a_name_written_on_the_picture_is_not_speech_and_a_goal_is():

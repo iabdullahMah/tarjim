@@ -239,3 +239,18 @@ def test_mission_goals_are_commands():
 
 def test_stay_joined_to_and():
     assert terms.fix_arabic("اخفض صوتك وابقى قريباً.", "Keep your voice down and stay close.") == "اخفض صوتك وابق قريباً."
+
+
+def test_pills_are_pills_unless_the_line_is_about_birth_control():
+    from tarjim import terms
+
+    fix = terms.fix_arabic
+    assert fix("هو طبيب حقيقي، مع حبوب منع الحمل الحقيقية.", "He is a real doctor, with real pills.") == "هو طبيب حقيقي، مع الحبوب الحقيقية."
+    assert fix("لماذا لا تأخذ حبوب منع الحمل لذلك؟", "Why don't you take a pill for it?") == "لماذا لا تأخذ الحبوب لذلك؟"
+    assert fix("سنحضر حبوب منع الحمل.", "We will bring the pills.") == "سنحضر الحبوب."
+    # a line that is about birth control keeps its words
+    kept = "هل تتناولين حبوب منع الحمل؟"
+    assert fix(kept, "Are you on the pill?") == kept
+    assert fix(kept, "Are you taking birth control pills?") == kept
+    # and a line without the word is not touched
+    assert fix(kept, "Are you taking it?") == kept
