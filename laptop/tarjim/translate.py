@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
-from . import gender, paths, terms
+from . import gender, paths, saudi, terms
 
 MODELS_DIR = paths.REPO / "models"
 CACHE_FILE = paths.HOME_DIR / "translations.sqlite"
@@ -1530,6 +1530,10 @@ class CachedTranslator:
         if better is not None:
             self.last_source = "better"
             return better, True, (time.perf_counter() - t0) * 1000.0
+        known = self._known_wording(key)
+        if known is not None:
+            self.last_source = "phrase"
+            return known, True, (time.perf_counter() - t0) * 1000.0
         matched = self._matched(key)
         engine_key = self._engine_key(matched)
         hit = self.cache.get(self.profile, key, engine_key, self.style)
@@ -1556,6 +1560,25 @@ class CachedTranslator:
         self.history.append((key, ar))
         del self.history[:-8]
         return ar, False, (time.perf_counter() - t0) * 1000.0
+
+    def _known_wording(self, key: str) -> str | None:
+        """A line that needs no translating, because every sentence of it has a wording already:
+        a short everyday line in the game's colloquial Arabic (saudi.py: "Let's go." is «يلا»
+        every time it is said), or a sentence the stronger translator answered before. So
+        "Okay. Let's go." is made of the two, at once and with no request."""
+        colloquial = self.dialect == "saudi"
+        parts = split_sentences(key)
+        if len(parts) > 4:
+            return None
+        out = []
+        for part in parts:
+            ar = saudi.lookup(part) if colloquial else None
+            if ar is None and len(parts) > 1:
+                ar = self.cache.get_fix(self.profile, part) or self.cache.get_better(self.profile, part, self.dialect)
+            if ar is None:
+                return None
+            out.append(ar)
+        return " ".join(out) if out else None
 
     def fix(self, english: str, arabic: str | None) -> None:
         """Remember the user's own wording for a line (None: forget it)."""

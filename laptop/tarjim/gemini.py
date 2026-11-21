@@ -52,6 +52,12 @@ BACKLOG = 400  # lines kept waiting while requests are refused
 CONTEXT = 4  # earlier lines given with a request, so "he", "it" and the tone are understood
 TIMEOUT_S = 8.0
 MIN_LETTERS = 4  # shorter lines ("No.", "OK") are left to the local engine and its phrase list
+# So are lines of one or two words ("Come on!", "Oh, okay."): a free key answers about five
+# hundred requests a day, and one line in nine of a real session was this short.
+MIN_WORDS = 3
+# This many refusals for quota in a row, with no answer between them, and the key's allowance
+# for the day is taken to be spent: the user is told, instead of wondering why the Arabic changed.
+SPENT_AFTER = 4
 PAUSES_S = (10.0, 30.0, 120.0, 600.0, 1800.0)  # after one refusal, after the next one, ...
 
 _STYLE = {
@@ -347,6 +353,8 @@ class Provider:
         self.requests = 0
         self.answered = 0  # requests answered in a row
         self.refusals = 0
+        self.quota_run = 0  # refusals for quota in a row
+        self.spent = False  # its allowance for the day looks spent
         self.not_before = 0.0
 
     def ask(self, lines: list[dict], **about) -> list[str]:
@@ -357,7 +365,7 @@ class Provider:
 
     def view(self) -> dict:
         return {"id": self.id, "name": self.name, "state": self.state, "done": self.done,
-                "gap_s": round(self.gap_s, 1), "error": self.error}
+                "gap_s": round(self.gap_s, 1), "error": self.error, "spent": self.spent}
 
 
 def check(key: str, model: str, *, base: str = API) -> str:
@@ -449,7 +457,7 @@ class Refiner:
             if not wanted or self._closed or self.state == "bad_key":
                 return
             sk = loose_key(en)
-            if sum(ch.isalpha() for ch in en) < MIN_LETTERS or sk in self._known:
+            if sum(ch.isalpha() for ch in en) < MIN_LETTERS or len(en.split()) < MIN_WORDS or sk in self._known:
                 return
             self._known.add(sk)
             self._todo.append({**line, "earlier": earlier})
@@ -461,13 +469,16 @@ class Refiner:
         en = normalize_english(english)
         with self._lock:
             return (not self._closed and sum(ch.isalpha() for ch in en) >= MIN_LETTERS
-                    and loose_key(en) not in self._known)
+                    and len(en.split()) >= MIN_WORDS and loose_key(en) not in self._known)
 
     def status(self) -> dict:
         with self._lock:
             state = self.state
             error = "" if state == "ok" else next((p.error for p in self.providers if p.error), "")
+            usable = [p for p in self.providers if p.state != "bad_key"]
             return {"state": state, "done": self.done, "waiting": len(self._todo), "error": error,
+                    # every key that could answer has run out for the day: the local Arabic carries on
+                    "spent": bool(usable) and all(p.spent for p in usable),
                     "gap_s": round(self.gap_s, 1), "providers": [p.view() for p in self.providers]}
 
     def close(self) -> None:
@@ -519,6 +530,7 @@ class Refiner:
             with self._lock:
                 was = p.state if p.requests > 1 else ""
                 p.state, p.error, p.refusals = "ok", "", 0
+                p.quota_run, p.spent = 0, False
                 p.answered += 1
                 if p.answered % EASE_AFTER == 0 and p.gap_s > p.min_gap_s:
                     p.gap_s = max(p.min_gap_s, p.gap_s * GAP_DOWN)
@@ -564,6 +576,10 @@ class Refiner:
             else:
                 if exc.kind == "quota":  # asked too often for this key: ask less often from now on
                     p.answered = 0
+                    p.quota_run += 1
+                    if p.quota_run >= SPENT_AFTER and not p.spent:
+                        p.spent = True
+                        p.error = f"خلص حد مفتاح {p.name} لليوم على الأغلب. يتجدد بكرة."
                     p.gap_s = min(GAP_MAX_S, max(p.gap_s * GAP_UP, p.min_gap_s, 1.0))
                 pause = self.pauses_s[min(p.refusals, len(self.pauses_s) - 1)] if self.pauses_s else p.gap_s
                 p.refusals += 1

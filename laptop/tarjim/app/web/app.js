@@ -603,7 +603,7 @@ function showGemini(g) {
   const any = g.has_key || (g.extra || []).length > 0;
   $("#gemini-on").disabled = !any;
   $("#gemini-state").textContent = !any ? "ما فيه مفتاح" : !g.enabled ? "مطفي"
-    : st ? `${GEMINI_STATE[st.state] || ""}${st.done ? ` · ${st.done} سطر` : ""}` : "جاهز";
+    : st ? `${st.spent ? "خلص الحد اليومي" : GEMINI_STATE[st.state] || ""}${st.done ? ` · ${st.done} سطر` : ""}` : "جاهز";
   // the other keys, each with its own state while translating
   const live = Object.fromEntries(((st && st.providers) || []).map(p => [p.id, p]));
   $("#extra-list").replaceChildren(...(g.extra || []).map(x => {
@@ -1518,6 +1518,12 @@ function connect() {
     const st = JSON.parse(e.data);
     renderStats(st);
     if (S.gemini && st.gemini) showGemini({ ...S.gemini, status: st.gemini });
+    // every key ran out for the day: said once, so the change of Arabic is not a mystery
+    if (st.gemini && st.gemini.spent && !S.spentTold) {
+      S.spentTold = true;
+      toast("خلص الحد اليومي لمفاتيح الذكاء. الترجمة تكمل بالمترجم المحلي، والحد يتجدد بكرة.");
+    }
+    if (st.gemini && !st.gemini.spent) S.spentTold = false;
   });
   es.addEventListener("better", e => betterLine(JSON.parse(e.data)));
   es.addEventListener("update", e => updateProgress(JSON.parse(e.data)));

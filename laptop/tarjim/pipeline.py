@@ -382,7 +382,7 @@ class Pipeline:
             waiting, self._wait_job = self._wait_job, None
             self.ai_late += 1
             self._show(waiting)
-        if (self.ai_first and self.refiner is not None and job.source not in ("fix", "better")
+        if (self.ai_first and self.refiner is not None and job.source not in ("fix", "better", "phrase")
                 and self.refiner.state == "ok" and self.refiner.wants(job.english)):
             self._wait_job = job
             job.waited = True
@@ -468,7 +468,7 @@ class Pipeline:
             self.on_line(job.english, job.arabic)
         if self.refiner is not None and not asked:
             # the user's own wording and an answer stored before need no asking again
-            self.refiner.seen(job.english, job.speaker, wanted=job.source not in ("fix", "better"))
+            self.refiner.seen(job.english, job.speaker, wanted=job.source not in ("fix", "better", "phrase"))
 
     def better_arrived(self, english: str, arabic: str) -> None:
         """The stronger translator's Arabic for a line (called from its thread). It is stored

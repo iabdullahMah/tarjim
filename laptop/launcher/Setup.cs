@@ -33,8 +33,8 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("Tarjim")]
 [assembly: AssemblyDescription("Installer for Tarjim: Arabic subtitles over PS5 games")]
 [assembly: AssemblyCopyright("Copyright 2026 Tarjim")]
-[assembly: AssemblyVersion("0.5.9.0")]
-[assembly: AssemblyFileVersion("0.5.9.0")]
+[assembly: AssemblyVersion("0.5.10.0")]
+[assembly: AssemblyFileVersion("0.5.10.0")]
 
 /// <summary>A window onto one part of a file, so the appended zip reads as a file of its own.</summary>
 sealed class SubStream : Stream
@@ -70,7 +70,7 @@ sealed class SubStream : Stream
 
 static class Installer
 {
-    public const string Version = "0.5.9";
+    public const string Version = "0.5.10";
     public const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Tarjim";
     static readonly byte[] Magic = Encoding.ASCII.GetBytes("TARJIMZ1");
 
