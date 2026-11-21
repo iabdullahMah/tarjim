@@ -42,6 +42,18 @@ def looks_like_subtitle(text: str) -> bool:
     return latin / len(letters) >= 0.7
 
 
+def looks_like_label(text: str) -> bool:
+    """One to three words, each starting with a capital or a mark, and no sentence's end: the
+    name of a street, a shop or a place the game writes on the picture ("Gas Station", "Port
+    Somewhere", a price), or a piece of one. Speech ends in a mark, and is rarely all capitals
+    at the start of each word. A mission goal has the same shape ("Follow Someone"): the caller
+    lets those through by their verb."""
+    words = text.split()
+    if not 1 <= len(words) <= 3 or text.rstrip()[-1:] in ".!?…,\"'-":
+        return False
+    return all(w[:1].isupper() or not w[:1].isalpha() for w in words)
+
+
 def keep_lines(lines: list[str], scores: list[float]) -> tuple[list[str], list[float]]:
     """Leave out what is not part of the sentence: an empty reading, or a few badly read
     characters on a line of their own beside a well read line (a button picture or a mark the

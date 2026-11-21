@@ -89,17 +89,36 @@ def google():
     g.close()
 
 
-def test_one_or_two_words_are_not_worth_a_request(google):
+def test_one_word_is_not_worth_a_request_and_two_are(google):
     r = gemini.Refiner(Cache(":memory:"), "g", key=KEY, model="m", base=google.base, gap_s=0.0, pauses_s=(0.05,))
-    for line in ("Come on!", "Oh, okay.", "Yeah.", "Right now?"):
+    for line in ("Yeah.", "What?", "Beautiful!"):
         assert not r.wants(line)
         r.seen(line)
-    assert r.wants("Kiss my grits!")
-    r.seen("Kiss my grits!")
+    # a goal or a curse of two words is worth it: the local engine words those badly
+    assert r.wants("Follow Someone") and r.wants("Get lost!")
+    r.seen("Follow Someone")
     assert _wait(lambda: r.status()["done"] == 1)
     time.sleep(0.15)
-    assert len(google.requests) == 1  # only the three-word line was asked about
+    assert len(google.requests) == 1
     r.close()
+
+
+def test_a_busy_service_keeps_a_key_silent_for_seconds_not_for_long():
+    assert gemini.NET_PAUSES_S[0] <= 3.0 < gemini.PAUSES_S[0]  # quota waits longer than a hiccup
+    assert gemini.TIMEOUT_S <= 5.0
+
+
+def test_a_name_written_on_the_picture_is_not_speech_and_a_goal_is():
+    from tarjim import terms
+    from tarjim.vision.ocr import looks_like_label
+
+    for label in ("Gas Station", "Pawn Shop", "Port Somewhere", "Somewhere", "Upgrade ($12,500)", "Some Ave"):
+        assert looks_like_label(label) and not terms.starts_with_command(label), label
+    for goal in ("Follow Someone", "Approach Someone"):
+        assert looks_like_label(goal) and terms.starts_with_command(goal), goal  # kept by its verb
+    for speech in ("Get lost!", "Really, guys?", "Oh, good!", "Very funny.", "I'm listening.", "Wait, Sam!",
+                   "We leave at dawn", "Uh huh"):
+        assert not looks_like_label(speech), speech
 
 
 def test_a_key_refused_again_and_again_is_reported_spent_until_it_answers(google):

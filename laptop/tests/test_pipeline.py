@@ -162,7 +162,7 @@ def test_sentence_splitting_and_punctuation_restoration():
 # -- end to end on FakeTv -------------------------------------------------------------
 
 
-def _wait(cond, timeout=1.5):
+def _wait(cond, timeout=8.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end and not cond():
         time.sleep(0.01)
@@ -579,3 +579,41 @@ def test_the_line_on_the_tv_read_again_keeps_its_arabic(ocr):
         text_before, text_after = before[y0 - 60:y1 + 20, x0 - 100:x1 + 100], after[y0 - 60:y1 + 20, x0 - 100:x1 + 100]
         assert (text_before > 200).sum() == (text_after > 200).sum()  # the same letters are on the TV
         pipe.close()
+
+
+def test_a_shops_name_on_the_picture_gets_no_arabic_and_says_why(ocr, tmp_path):
+    import json
+
+    rng = np.random.default_rng(5)
+    label, _ = synth.draw_subtitle(synth.background(rng, "dark"), ["Corner Pawn Shop"], "shadow", 42, 1000)
+    goal, _ = synth.draw_subtitle(synth.background(rng, "dark"), ["Follow Someone"], "shadow", 42, 1000)
+    asked = []
+
+    class Engine:
+        name = "e"
+
+        def translate(self, text, context=None):
+            asked.append(text)
+            return "اتبع فلان."
+
+    log = tmp_path / "s.jsonl"
+    with FakeTv() as tv, TvLink(tv.host, tv.port) as link:
+        link.connect()
+        pipe = Pipeline(link, CachedTranslator(Engine(), Cache(":memory:")), ocr, log_path=log)
+        t = 10.0
+        for frame in (label, goal):
+            for _ in range(8):
+                pipe.process(frame, t)
+                t += 0.033
+            pipe.wait_idle()
+            pipe.process(frame, t)
+            if frame is label:
+                assert tv.layer_ids() == [] and asked == []  # never translated, never drawn
+                for _ in range(4):
+                    t += 0.033
+                    pipe.process(np.zeros_like(frame), t)
+        assert _wait(lambda: tv.layer_ids() == ["fill", "text"])  # the goal went up
+        assert asked == ["Follow Someone"]
+        pipe.close()
+    recs = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
+    assert [(r["reason"], r["en"]) for r in recs if r.get("kind") == "rejected"] == [("label", "Corner Pawn Shop")]

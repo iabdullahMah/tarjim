@@ -50,11 +50,15 @@ GAP_DOWN = 0.85  # ... and how much shorter after EASE_AFTER answers
 BATCH = 8  # lines in one request at most
 BACKLOG = 400  # lines kept waiting while requests are refused
 CONTEXT = 4  # earlier lines given with a request, so "he", "it" and the tone are understood
-TIMEOUT_S = 8.0
+TIMEOUT_S = 5.0  # an answer later than this is of no use to the line on the TV
+# After a refusal that is not about quota (the service busy, no answer in time): a session log
+# showed 44 of these in 83 minutes, each one keeping its key silent for ten seconds or more.
+NET_PAUSES_S = (3.0, 8.0, 30.0, 120.0)
 MIN_LETTERS = 4  # shorter lines ("No.", "OK") are left to the local engine and its phrase list
-# So are lines of one or two words ("Come on!", "Oh, okay."): a free key answers about five
-# hundred requests a day, and one line in nine of a real session was this short.
-MIN_WORDS = 3
+# So are lines of one word ("Yeah.", "What?"): a free key answers about five hundred requests
+# a day. (Two-word lines were left out too for one version: a session log then showed goals
+# and curses of two words staying in the local engine's wording, a hundred lines in 83 minutes.)
+MIN_WORDS = 2
 # This many refusals for quota in a row, with no answer between them, and the key's allowance
 # for the day is taken to be spent: the user is told, instead of wondering why the Arabic changed.
 SPENT_AFTER = 4
@@ -581,7 +585,8 @@ class Refiner:
                         p.spent = True
                         p.error = f"خلص حد مفتاح {p.name} لليوم على الأغلب. يتجدد بكرة."
                     p.gap_s = min(GAP_MAX_S, max(p.gap_s * GAP_UP, p.min_gap_s, 1.0))
-                pause = self.pauses_s[min(p.refusals, len(self.pauses_s) - 1)] if self.pauses_s else p.gap_s
+                steps = self.pauses_s if exc.kind == "quota" or self.pauses_s is not PAUSES_S else NET_PAUSES_S
+                pause = steps[min(p.refusals, len(steps) - 1)] if steps else p.gap_s
                 p.refusals += 1
                 p.state = "waiting"
                 p.not_before = time.monotonic() + pause

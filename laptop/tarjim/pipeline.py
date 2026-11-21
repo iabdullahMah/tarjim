@@ -21,13 +21,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import paths
+from . import paths, terms
 from . import protocol as P
 from .translate import CachedTranslator, TranslateError, loose_key, normalize_english
 from .tvlink import TvLink, TvLinkError, now_ms
 from .vision import render
 from .vision.detect import Block, DetectParams, detect, mask_iou
-from .vision.ocr import MIN_SCORE, OcrEngine
+from .vision.ocr import MIN_SCORE, OcrEngine, looks_like_label
 from .vision.tracker import Event, SubtitleTracker, TrackParams
 
 LAYER_TTL_MS = 700
@@ -303,7 +303,13 @@ class Pipeline:
             read = self.ocr.read(job.frame, job.block)
             job.ocr_ms = (time.perf_counter() - t) * 1000.0
             job.english, job.speaker, job.score = read.text, read.speaker, read.score
-            if read.ok and not job.cancelled:
+            # A place's or a shop's name written on the picture is not speech: translated, it
+            # put scraps like a street's name in Arabic letters on the TV. A goal of the same
+            # shape ("Follow Someone") is kept by its verb.
+            label = read.ok and looks_like_label(read.text) and not terms.starts_with_command(read.text)
+            if label:
+                job.reason = "label"
+            elif read.ok and not job.cancelled:
                 job.arabic, job.hit, job.mt_ms = self.translator.translate(read.text)
                 job.source = getattr(self.translator, "last_source", "")
                 t = time.perf_counter()
