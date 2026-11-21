@@ -269,6 +269,59 @@ def gemini_view() -> dict:
     }
 
 
+_backfill = None
+
+
+def backfill():
+    """The one catching-up job (gemini.Backfill), made on first use."""
+    global _backfill
+    if _backfill is None:
+        from .. import gemini
+
+        _backfill = gemini.Backfill(lambda status: hub.publish("backfill", status))
+    return _backfill
+
+
+def backfill_view(profile: str) -> dict:
+    """How many of this game's seen lines still have no answer, and how the job is doing."""
+    from .. import gemini
+    from ..translate import Cache, load_profile
+
+    job = backfill()
+    out = job.status()
+    if not job.running:
+        try:
+            prof = load_profile(profile)
+        except Exception:
+            prof = {}
+        cache = Cache()
+        try:
+            out["pending"] = len(gemini.pending_lines(cache, profile, gemini.dialect_of(profile, prof)))
+        finally:
+            cache.close()
+    return out
+
+
+def backfill_start(body: dict) -> dict:
+    from .. import gemini
+    from ..translate import load_profile
+
+    profile = str(body.get("profile") or "default")
+    if live.state != "idle":
+        return {"ok": False, "error": "وقّف الترجمة أول. التحسين يستخدم نفس المفاتيح."}
+    if not gemini.providers_from_settings():
+        return {"ok": False, "error": "ما فيه مفتاح. أضف مفتاح Gemini أول."}
+    try:
+        prof = load_profile(profile)
+    except Exception:
+        prof = {}
+    started = backfill().start(
+        profile, title=str(prof.get("title") or ""), dialect=gemini.dialect_of(profile, prof),
+        glossary={str(k): str(v) for k, v in (prof.get("glossary") or {}).items()},
+        female={str(n) for n in (prof.get("female") or [])}, providers=gemini.providers_from_settings(gemini.API))
+    return {"ok": True, "started": started, **backfill().status()}
+
+
 def gemini_extra_add(body: dict) -> dict:
     """One more key: tried with a small line first, saved only when it answers in Arabic."""
     from .. import gemini
@@ -731,6 +784,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(checks())
             if url.path == "/api/gemini":
                 return self._json(gemini_view())
+            if url.path == "/api/gemini/backfill":
+                return self._json(backfill_view(q.get("profile", "default")))
             if url.path == "/api/update":
                 return self._json(update_view(fresh=q.get("fresh") == "1"))
             if url.path == "/api/profile":
@@ -893,6 +948,7 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = paths.load_config()
                 cfg["last_profile"] = profile
                 paths.save_config(cfg)
+                backfill().stop()  # the keys are the session's now
                 return self._json({"started": live.start(profile)})
             if path == "/api/stop":
                 live.stop()
@@ -905,6 +961,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(gemini_test(body))
             if path == "/api/gemini/extra":
                 return self._json(gemini_extra_add(body))
+            if path == "/api/gemini/backfill":
+                return self._json(backfill_start(body))
+            if path == "/api/gemini/backfill/stop":
+                backfill().stop()
+                return self._json({"ok": True})
             if path == "/api/gemini/extra/remove":
                 return self._json(gemini_extra_remove(body))
             if path == "/api/update/apply":

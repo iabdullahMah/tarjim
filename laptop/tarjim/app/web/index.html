@@ -236,6 +236,15 @@
         <label class="switch"><input type="checkbox" id="gemini-wait"><i></i>
           <span>انتظر ترجمة الذكاء <small>مطفي: السطر يطلع فوراً، ويتحسّن لو رد الذكاء بسرعة. مفعّل: السطر ينتظر الذكاء ثانية تقريباً ثم يطلع مرة وحدة. لا تفعّله في الكلام السريع، لأن السطور تتأخر وبعضها يطلع بعد ما يروح كلامه.</small></span></label>
         <div class="field">
+          <div class="field-head"><b>حسّن المحفوظ</b><span class="muted" id="backfill-count"></span></div>
+          <p class="muted">يرسل للذكاء كل سطور هذي اللعبة اللي شفتها وأنت تلعب وما انترجمت به، عشرين سطر في كل طلب. اللي يرجع ينحفظ ويطلع المرة الجاية من أول لحظة. شغّله وأنت مو قاعد تلعب: يستخدم نفس المفاتيح، ويوقف لحاله لو بدأت الترجمة.</p>
+          <div class="row">
+            <button class="btn soft" id="backfill-go">ابدأ التحسين</button>
+            <span class="update-meter" id="backfill-meter" hidden><i id="backfill-fill"></i></span>
+            <span class="muted" id="backfill-text"></span>
+          </div>
+        </div>
+        <div class="field">
           <div class="field-head"><b>مفاتيح إضافية</b><span class="muted">اختياري</span></div>
           <p class="muted">مفتاح من خدمة ثانية (مثل Grok) يشتغل مع Gemini: السطور تتوزّع بينهم فيتبدّل عدد أكبر وهي على الشاشة، ولو واحد وقف يكمل الثاني. اشتراك التطبيق ما يكفي، لازم «مفتاح API» من موقع المطوّرين حق الخدمة. مفتاحين من نفس الشركة لتجاوز حدّها المجاني ممكن يخالف شروطها.</p>
           <div id="extra-list"></div>

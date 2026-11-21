@@ -728,6 +728,23 @@ class Cache:
             )
             self._db.commit()
 
+    def seen_lines(self, profile: str) -> list[str]:
+        """Every line of this game the local engine ever translated, in the order they were
+        first seen (so neighbours in the list were neighbours in play)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT en, MIN(ts) FROM tr WHERE profile=? GROUP BY en ORDER BY MIN(ts)", (profile,)
+            ).fetchall()
+        return [en for en, _ts in rows]
+
+    def answered(self, profile: str, style: str) -> tuple[set[str], set[str]]:
+        """(the lines, their loose keys) that need no asking in this kind of Arabic: answered
+        by the stronger translator before, or worded by the user."""
+        with self._lock:
+            rows = self._db.execute("SELECT en, sk FROM better WHERE profile=? AND style=?", (profile, style)).fetchall()
+            rows += self._db.execute("SELECT en, sk FROM fix WHERE profile=?", (profile,)).fetchall()
+        return {en for en, _ in rows}, {sk for _, sk in rows if sk}
+
     def count_better(self, profile: str | None = None) -> int:
         with self._lock:
             if profile is None:

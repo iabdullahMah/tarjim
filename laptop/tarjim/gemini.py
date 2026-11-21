@@ -361,11 +361,11 @@ class Provider:
         self.spent = False  # its allowance for the day looks spent
         self.not_before = 0.0
 
-    def ask(self, lines: list[dict], **about) -> list[str]:
+    def ask(self, lines: list[dict], timeout: float = TIMEOUT_S, **about) -> list[str]:
         if self.kind == "gemini":
-            return call(self.key, self.model, build_request(lines, **about), base=self.base)
+            return call(self.key, self.model, build_request(lines, **about), base=self.base, timeout=timeout)
         rules, text = build_prompt(lines, **about)
-        return call_openai(self.key, self.model, self.base, rules, text)
+        return call_openai(self.key, self.model, self.base, rules, text, timeout=timeout)
 
     def view(self) -> dict:
         return {"id": self.id, "name": self.name, "state": self.state, "done": self.done,
@@ -591,3 +591,176 @@ class Refiner:
                 p.state = "waiting"
                 p.not_before = time.monotonic() + pause
             self._lock.notify_all()  # another key may take these lines now
+
+
+# -- catching up: the lines already seen, asked about in large batches ---------------------------
+
+BACKFILL_BATCH = 20  # lines in one request: nothing waits for the answer, so a request can be large
+BACKFILL_SMALL = 5  # ... and this many when a large answer came back with the wrong count
+BACKFILL_GAP_S = 4.0
+BACKFILL_TIMEOUT_S = 45.0
+BACKFILL_QUOTA_WAITS_S = (20.0, 60.0)  # after a refusal for quota; one more and the key is spent for now
+
+
+def providers_from_settings(base: str = API) -> list[Provider]:
+    """Every key the user has, as fresh Providers (the first Gemini key, then the others)."""
+    g = settings()
+    out = [Provider("gemini", g["key"], g["model"], base)] if g["key"] else []
+    return out + [Provider(i["kind"], i["key"], i["model"], i["base"], name=i["name"], id=i["id"])
+                  for i in extra_keys()]
+
+
+def worth_asking(english: str) -> bool:
+    """A line the stronger translator should see: speech of two words or more, not a scrap."""
+    from . import terms
+    from .vision.ocr import looks_like_label, looks_like_subtitle
+
+    en = normalize_english(english)
+    if sum(ch.isalpha() for ch in en) < MIN_LETTERS or len(en.split()) < MIN_WORDS:
+        return False
+    if not looks_like_subtitle(en):
+        return False
+    return not looks_like_label(en) or terms.starts_with_command(en)
+
+
+def pending_lines(cache: Cache, profile: str, dialect: str) -> list[str]:
+    """The lines of this game seen while playing that have no answer yet, in the order seen."""
+    have, have_loose = cache.answered(profile, dialect)
+    out, taken = [], set()
+    for en in cache.seen_lines(profile):
+        sk = loose_key(en)
+        if en in have or not sk or sk in have_loose or sk in taken or not worth_asking(en):
+            continue
+        taken.add(sk)
+        out.append(en)
+    return out
+
+
+class Backfill:
+    """Asks the stronger translator about every line already seen, twenty to a request, while
+    nobody is playing. During play a request carries one line, because the line on the TV
+    cannot wait; here nothing waits, so a free key's five hundred requests a day cover about
+    ten thousand lines. Lines go in the order they were seen, so each request holds a stretch
+    of one conversation. Everything answered is stored like any other answer: the next time
+    the line is on screen it is shown in this Arabic from the first moment."""
+
+    def __init__(self, publish=None) -> None:
+        self.publish = publish  # callback(status) after each request
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.running = False
+        self.profile = ""
+        self.total = self.done = self.stored = self.skipped = 0
+        self.error = ""
+
+    def status(self) -> dict:
+        return {"running": self.running, "profile": self.profile, "total": self.total, "done": self.done,
+                "stored": self.stored, "skipped": self.skipped, "error": self.error}
+
+    def start(self, profile: str, *, title: str = "", dialect: str = "msa", glossary: dict[str, str] | None = None,
+              female: set[str] | None = None, providers: list[Provider] | None = None,
+              cache_path=None, gap_s: float = BACKFILL_GAP_S, quota_waits_s=BACKFILL_QUOTA_WAITS_S) -> bool:
+        with self._lock:
+            if self.running:
+                return False
+            self.running, self.profile, self.error = True, profile, ""
+            self.total = self.done = self.stored = self.skipped = 0
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run, name="tarjim-backfill", daemon=True,
+                args=(profile, title, dialect if dialect in DIALECTS else "msa", dict(glossary or {}), set(female or ()),
+                      list(providers if providers is not None else providers_from_settings()), cache_path, gap_s,
+                      tuple(quota_waits_s)))
+            self._thread.start()
+            return True
+
+    def stop(self, wait: float = 0.0) -> None:
+        self._stop.set()
+        thread = self._thread
+        if wait and thread is not None:
+            thread.join(timeout=wait)
+
+    def _tell(self) -> None:
+        if self.publish is not None:
+            try:
+                self.publish(self.status())
+            except Exception:
+                pass
+
+    def _run(self, profile, title, dialect, glossary, female, providers, cache_path, gap_s, quota_waits_s) -> None:
+        cache = Cache(cache_path)
+        try:
+            if not providers:
+                self.error = "ما فيه مفتاح. أضف مفتاح Gemini أول."
+                return
+            lines = pending_lines(cache, profile, dialect)
+            self.total = len(lines)
+            self._tell()
+            i, size, net_run = 0, BACKFILL_BATCH, 0
+            for p in providers:
+                p.gap_s, p.not_before, p.quota_run, p.state = gap_s, 0.0, 0, "ok"
+            while i < len(lines) and not self._stop.is_set():
+                alive = [p for p in providers if p.state == "ok"]
+                if not alive:
+                    self.error = "خلص حد المفاتيح حالياً. اللي ترجمته انحفظ، وكمّل الباقي بكرة."
+                    return
+                p = min(alive, key=lambda x: x.not_before)
+                wait = p.not_before - time.monotonic()
+                if wait > 0 and self._stop.wait(wait):
+                    return
+                batch = lines[i:i + size]
+                text = " ".join(batch).lower()
+                names = [(en, ar, en in female) for en, ar in glossary.items() if en and en.lower() in text][:60]
+                try:
+                    out = p.ask([{"en": en} for en in batch], timeout=BACKFILL_TIMEOUT_S, title=title, dialect=dialect,
+                                names=names, earlier=[])
+                    if len(out) != len(batch):
+                        raise GeminiError("bad", f"{len(out)} answers for {len(batch)} lines")
+                except GeminiError as exc:
+                    p.not_before = time.monotonic() + gap_s
+                    if exc.kind == "key":
+                        p.state = "bad_key"
+                    elif exc.kind == "quota":
+                        if p.quota_run >= len(quota_waits_s):
+                            p.state = "spent"
+                        else:
+                            p.not_before = time.monotonic() + quota_waits_s[p.quota_run]
+                        p.quota_run += 1
+                    elif exc.kind == "net":
+                        net_run += 1
+                        if net_run >= 6:
+                            self.error = friendly(exc, p.name)
+                            return
+                    elif size > BACKFILL_SMALL:
+                        size = BACKFILL_SMALL  # the count came back wrong: the same lines again, fewer at a time
+                    else:
+                        i += len(batch)  # these few cannot be answered: left to the local Arabic
+                        self.done += len(batch)
+                        self.skipped += len(batch)
+                        size = BACKFILL_BATCH
+                    self._tell()
+                    continue
+                net_run, p.quota_run = 0, 0
+                p.not_before = time.monotonic() + gap_s
+                for en, raw in zip(batch, out):
+                    ar = normalize_arabic(raw)
+                    if _usable(en, ar):
+                        cache.put_better(profile, en, dialect, ar, p.model)
+                        self.stored += 1
+                    else:
+                        self.skipped += 1
+                i += len(batch)
+                self.done += len(batch)
+                if size < BACKFILL_BATCH and (i % BACKFILL_BATCH) == 0:
+                    size = BACKFILL_BATCH
+                self._tell()
+        except Exception as exc:  # never a crash: whatever was stored stays stored
+            self.error = f"وقف التحسين: {type(exc).__name__}"
+        finally:
+            try:
+                cache.close()
+            except Exception:
+                pass
+            self.running = False
+            self._tell()

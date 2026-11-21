@@ -619,6 +619,45 @@ function showGemini(g) {
     return row;
   }));
 }
+/* ---- catching up: the lines already seen, sent to the stronger translator in large batches ---- */
+function showBackfill(b) {
+  const go = $("#backfill-go"), text = $("#backfill-text"), meter = $("#backfill-meter");
+  go.textContent = b.running ? "وقّف" : "ابدأ التحسين";
+  go.disabled = false;
+  meter.hidden = !b.running;
+  if (b.running) {
+    const pct = b.total ? Math.round(b.done * 100 / b.total) : 0;
+    $("#backfill-fill").style.width = pct + "%";
+    text.textContent = b.total ? b.done + " من " + b.total + " سطر" : "أجهّز القائمة…";
+    $("#backfill-count").textContent = "";
+    return;
+  }
+  if (b.error) text.textContent = b.error + (b.stored ? " (انحفظ " + b.stored + " سطر)" : "");
+  else if (b.total && b.done >= b.total) text.textContent = "خلص ✓ انحفظ " + b.stored + " سطر" + (b.skipped ? "، و" + b.skipped + " ما انترجم" : "");
+  else if (b.done) text.textContent = "وقف عند " + b.done + " من " + b.total + ". انحفظ " + b.stored + " سطر.";
+  else text.textContent = "";
+  if (b.pending != null) {
+    $("#backfill-count").textContent = b.pending ? b.pending + " سطر ينتظر" : "ما فيه سطور تنتظر";
+    go.disabled = !b.pending;
+  }
+}
+async function loadBackfill() {
+  const name = S.profile.name;
+  try { showBackfill(await api("/api/gemini/backfill?profile=" + encodeURIComponent(name))); } catch { return; }
+  $("#backfill-go").onclick = async () => {
+    const go = $("#backfill-go");
+    go.disabled = true;
+    try {
+      if (go.textContent === "وقّف") await api("/api/gemini/backfill/stop", {});
+      else {
+        const r = await api("/api/gemini/backfill", { profile: name });
+        if (!r.ok) { toast(r.error); go.disabled = false; return; }
+        showBackfill(r);
+      }
+    } catch (e) { toast(e.message); go.disabled = false; }
+  };
+}
+
 function wireExtraKeys() {
   const preset = $("#extra-preset"), model = $("#extra-model"), base = $("#extra-base");
   const sync = () => {
@@ -648,6 +687,7 @@ async function loadGemini() {
   try { g = await api("/api/gemini"); } catch { return; }
   showGemini(g);
   wireExtraKeys();
+  loadBackfill();
   $$("#dialect button").forEach(b => {
     b.classList.toggle("on", b.dataset.v === S.profile.dialect);
     b.onclick = () => {
@@ -1527,6 +1567,11 @@ function connect() {
   });
   es.addEventListener("better", e => betterLine(JSON.parse(e.data)));
   es.addEventListener("update", e => updateProgress(JSON.parse(e.data)));
+  es.addEventListener("backfill", e => {
+    const b = JSON.parse(e.data);
+    showBackfill(b);
+    if (!b.running && $("#view-look").classList.contains("on")) loadBackfill();  // the count of what is left
+  });
   // The Xbox picture is received by the program's own window: start and stop it with the session.
   es.addEventListener("xbox", e => {
     if (S.remote) return;
