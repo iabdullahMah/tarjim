@@ -57,6 +57,7 @@ TIMEOUT_S = 8.0
 # After a refusal that is not about quota (the service busy, no answer in time): a session log
 # showed 44 of these in 83 minutes, each one keeping its key silent for ten seconds or more.
 NET_PAUSES_S = (3.0, 8.0, 30.0, 120.0)
+BUSY_RETRY_S = 0.5  # before the one immediate second try of a request the service was too busy for
 MIN_LETTERS = 4  # shorter lines ("No.", "OK") are left to the local engine and its phrase list
 # So are lines of one word ("Yeah.", "What?"): a free key answers about five hundred requests
 # a day. (Two-word lines were left out too for one version: a session log then showed goals
@@ -361,6 +362,7 @@ class Provider:
         self.answered = 0  # requests answered in a row
         self.refusals = 0
         self.quota_run = 0  # refusals for quota in a row
+        self.retried = 0  # requests tried a second time because the service was busy
         self.spent = False  # its allowance for the day looks spent
         self.not_before = 0.0
 
@@ -524,8 +526,19 @@ class Refiner:
                 return
             try:
                 p.requests += 1
-                out = p.ask(batch, title=self.title, dialect=self.dialect, names=self._names(batch),
-                            earlier=batch[0]["earlier"])
+                about = dict(title=self.title, dialect=self.dialect, names=self._names(batch),
+                             earlier=batch[0]["earlier"])
+                try:
+                    out = p.ask(batch, **about)
+                except GeminiError as busy:
+                    # "The service is busy" is over in a moment more often than not: the same
+                    # request once more, at once, before the key is made to wait. (A session
+                    # log showed 54 of these in 39 minutes, each costing its lines their turn.)
+                    if busy.detail != "HTTP 503" or self._closed:
+                        raise
+                    time.sleep(BUSY_RETRY_S)
+                    p.retried += 1
+                    out = p.ask(batch, **about)
                 if len(out) != len(batch):
                     raise GeminiError("bad", f"{len(out)} answers for {len(batch)} lines")
             except GeminiError as exc:

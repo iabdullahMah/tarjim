@@ -149,3 +149,26 @@ def test_spent_means_every_key_that_could_answer(google):
         r.close()
     finally:
         other.close()
+
+
+def test_a_busy_service_is_asked_once_more_at_once(google, monkeypatch):
+    monkeypatch.setattr(gemini, "BUSY_RETRY_S", 0.01)
+    notes = []
+    google.plan = [503]  # busy for one request, then fine
+    r = gemini.Refiner(Cache(":memory:"), "g", key=KEY, model="m", base=google.base, gap_s=0.0, pauses_s=(5.0,))
+    r.log = notes.append
+    r.seen("The first line that was said here.")
+    assert _wait(lambda: r.status()["done"] == 1, timeout=3)  # long before the five-second pause
+    assert len(google.requests) == 2 and r.providers[0].retried == 1
+    assert [n["state"] for n in notes] == ["ok"]  # the user's log shows no failure: the line was answered
+    r.close()
+
+
+def test_a_service_busy_twice_makes_the_key_wait_as_before(google, monkeypatch):
+    monkeypatch.setattr(gemini, "BUSY_RETRY_S", 0.01)
+    google.plan = [503, 503]
+    r = gemini.Refiner(Cache(":memory:"), "g", key=KEY, model="m", base=google.base, gap_s=0.0, pauses_s=(0.2,))
+    r.seen("The first line that was said here.")
+    assert _wait(lambda: r.status()["done"] == 1, timeout=4)  # after the pause, on the third request
+    assert len(google.requests) == 3
+    r.close()

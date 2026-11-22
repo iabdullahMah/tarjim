@@ -122,8 +122,10 @@ def test_two_keys_share_the_lines_and_each_keeps_its_own_count(google, other):
 def test_when_one_key_is_refused_the_other_carries_on(google, other):
     google.plan = [403]  # the Gemini key is refused for good
     notes = []
+    # (the other key rests between its requests, so the Gemini key is sure to be given a line:
+    # with no rest the other one sometimes took all five and the refused key was never asked)
     r = gemini.Refiner(Cache(":memory:"), "g", key=KEY, model="some-model", base=google.base, gap_s=0.0,
-                       pauses_s=(0.05,), extra=[other.provider()])
+                       pauses_s=(0.05,), extra=[other.provider(gap_s=0.25)])
     r.log = notes.append
     for i in range(5):
         r.seen(f"Line number {i} that somebody said out loud.")
